@@ -29,6 +29,8 @@ test("speech starts only after explicit opt-in and Start; pause, stop and alert 
   await expect(page.locator("[data-navigation-state='idle']")).toBeVisible();
   await expect.poll(async () => Boolean(socket)).toBe(true);
   socket!.send(alertMessage("before-navigation"));
+  await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
+  await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: "Tìm tuyến đường", exact: true }).click();
   await expect(page.locator("[data-navigation-state='route_preview']")).toBeVisible({ timeout: 20000 });
   await expect(page.getByRole("button", { name: "Bắt đầu chỉ đường" })).toBeEnabled();
@@ -70,6 +72,8 @@ test("voice is muted by default; tracking starts only with consent and stops on 
   await installSpeechSpy(page);
   await page.goto("/");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
+  await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
+  await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: "Tìm tuyến đường", exact: true }).click();
   await expect(page.locator("[data-navigation-state='route_preview']")).toBeVisible({ timeout: 20000 });
   expect((await probe(page)).watches).toBe(0);
@@ -89,6 +93,8 @@ test("switching the selected live route cancels speech and returns to preview", 
   await installSpeechSpy(page);
   await page.goto("/");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
+  await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
+  await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: "Tìm tuyến đường", exact: true }).click();
   await expect(page.locator("[data-navigation-state='route_preview']")).toBeVisible({ timeout: 20000 });
   const alternative = page.getByRole("button", { name: /^Chọn Đường khác/ }).first();
@@ -109,6 +115,8 @@ test("consented position updates announce the next real OSRM turn once", async (
   await page.goto("/");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   const responsePromise = page.waitForResponse((response) => response.url().includes("/api/v1/routes/search") && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
+  await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: "Tìm tuyến đường", exact: true }).click();
   const response = await responsePromise;
   expect(response.status()).toBe(200);

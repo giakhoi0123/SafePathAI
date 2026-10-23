@@ -294,7 +294,8 @@ async def search_hcm_places(
     try:
         return await search_places(q=q, limit=limit, session=session, redis=redis)
     finally:
-        await redis.aclose()
+        if redis is not None:
+            await redis.aclose()
 
 
 @app.get(
@@ -315,7 +316,8 @@ async def reverse_hcm_place(
     try:
         return await reverse_geocode(lat=lat, lng=lng, session=session, redis=redis)
     finally:
-        await redis.aclose()
+        if redis is not None:
+            await redis.aclose()
 
 
 @app.get(
@@ -360,7 +362,8 @@ async def get_health(
     except Exception as exc:
         redis_status = f"unhealthy ({exc})"
     finally:
-        await redis.aclose()
+        if redis is not None:
+            await redis.aclose()
 
     # 3. Check OSRM
     osrm_status = "available"
@@ -402,7 +405,8 @@ async def get_weather_tide() -> WeatherTideSignal:
         signal = await get_combined_weather_tide(redis_client=redis)
         return signal
     finally:
-        await redis.aclose()
+        if redis is not None:
+            await redis.aclose()
 
 
 @app.get(
@@ -529,7 +533,8 @@ async def list_cameras(
                 )
             evidence_list.append(evidence)
     finally:
-        await redis.aclose()
+        if redis is not None:
+            await redis.aclose()
 
     return evidence_list
 
@@ -674,7 +679,8 @@ async def get_camera_metadata(
     except Exception:
         pass
     finally:
-        await redis.aclose()
+        if redis is not None:
+            await redis.aclose()
 
     if has_local:
         try:
@@ -778,7 +784,8 @@ async def search_safe_route(
 
         return recommended_route
     finally:
-        await redis.aclose()
+        if redis is not None:
+            await redis.aclose()
 
 
 # WebSocket Endpoint for Real-Time Alerts

@@ -5,6 +5,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { CameraEvidence, Coordinates, MapSelectionMode, RouteSegmentRisk, SafeRouteResponse } from "../types/contracts";
 import { Camera, MapPin } from "lucide-react";
+import GlassToggle, { CameraFilterMode } from "./Glass/GlassToggle";
 
 interface MapContainerProps {
   cameras: CameraEvidence[];
@@ -68,6 +69,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
   const mapRef = useRef<maplibregl.Map | null>(null);
   const callbacksRef = useRef({ onMapClickCoordinates, onSelectCamera, onSelectRoute });
   const [internalShowCameras, setInternalShowCameras] = useState(true);
+  const [cameraFilter, setCameraFilter] = useState<CameraFilterMode>("ALL");
   const isControlled = typeof controlledShowCameras === "boolean";
   const showCameras = isControlled ? controlledShowCameras : internalShowCameras;
 
@@ -78,6 +80,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     highlightedSegment,
     mapSelectionMode,
     showCameras,
+    cameraFilter,
   });
   const markerRef = useRef<maplibregl.Marker[]>([]);
   const lastLocationFocusRef = useRef(0);
@@ -94,6 +97,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     highlightedSegment,
     mapSelectionMode,
     showCameras,
+    cameraFilter,
   };
 
   useEffect(() => {
@@ -123,7 +127,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
 
   const updateCameras = useCallback(() => {
     const map = mapRef.current;
-    const { cameras: all, recommendedRoute: route, showCameras: visible } = dataRef.current;
+    const { cameras: all, recommendedRoute: route, showCameras: visible, cameraFilter: filter } = dataRef.current;
     if (!map?.getSource("camera-source")) return;
     if (!visible || map.getZoom() < 10) {
       setSource(map, "camera-source", empty());
@@ -131,18 +135,28 @@ export const MapContainer: React.FC<MapContainerProps> = ({
       return;
     }
     const bounds = map.getBounds();
-    const routeCoords = route?.geojson_path.coordinates as number[][] | undefined;
-    const features: GeoJSON.Feature[] = all
-      .filter((cam) => Number.isFinite(cam.lng) && Number.isFinite(cam.lat) && bounds.contains([cam.lng, cam.lat]))
-      .map((cam) => ({
+    const routeCoords = route?.geojson_path?.coordinates as number[][] | undefined;
+    const inBounds = all.filter((cam) => Number.isFinite(cam.lng) && Number.isFinite(cam.lat) && bounds.contains([cam.lng, cam.lat]));
+
+    const filtered = inBounds.filter((cam) => {
+      if (filter === "ON_ROUTE") return cameraNearRoute(cam.lng, cam.lat, routeCoords);
+      if (filter === "HAS_IMAGE") return Boolean(cam.has_image);
+      return true;
+    });
+
+    const features: GeoJSON.Feature[] = filtered.map((cam) => {
+      const onRoute = cameraNearRoute(cam.lng, cam.lat, routeCoords);
+      return {
         type: "Feature",
         geometry: { type: "Point", coordinates: [cam.lng, cam.lat] },
         properties: {
           id: cam.cam_id,
           label: cam.code || "Camera",
-          onRoute: cameraNearRoute(cam.lng, cam.lat, routeCoords) ? 1 : 0,
+          onRoute: onRoute ? 1 : 0,
+          hasImage: cam.has_image ? 1 : 0,
         },
-      }));
+      };
+    });
     setSource(map, "camera-source", { type: "FeatureCollection", features });
     if (containerRef.current) containerRef.current.dataset.cameraFeatureCount = String(features.length);
   }, []);
@@ -157,6 +171,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
       attributionControl: false,
     });
     mapRef.current = map;
+    if (typeof window !== "undefined") (window as any).__safepath_map = map;
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.AttributionControl({ compact: false }), "bottom-right");
 
@@ -197,7 +212,14 @@ export const MapContainer: React.FC<MapContainerProps> = ({
         source: "camera-source",
         filter: ["!", ["has", "point_count"]],
         paint: {
-          "circle-color": ["case", ["==", ["get", "onRoute"], 1], "#F59E0B", "#7C94FF"],
+          "circle-color": [
+            "case",
+            ["==", ["coalesce", ["get", "onRoute"], 0], 1],
+            "#F59E0B",
+            ["==", ["coalesce", ["get", "hasImage"], 0], 1],
+            "#06B6D4",
+            "#7C94FF",
+          ],
           "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 3.5, 14, 6],
           "circle-stroke-color": "#FFFFFF",
           "circle-stroke-width": 1.5,
@@ -287,9 +309,30 @@ export const MapContainer: React.FC<MapContainerProps> = ({
       if (containerRef.current) containerRef.current.dataset.mapZoom = map.getZoom().toFixed(3);
     };
 
+    const setCursorPointer = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = "pointer"; };
+    const resetCursor = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = ""; };
+
+    const onClusterClick = (e: maplibregl.MapLayerMouseEvent) => {
+      const features = map.queryRenderedFeatures(e.point, { layers: ["camera-clusters"] });
+      const clusterId = features[0]?.properties?.cluster_id;
+      const source = map.getSource("camera-source") as maplibregl.GeoJSONSource | undefined;
+      if (source && clusterId !== undefined) {
+        source.getClusterExpansionZoom(clusterId).then((zoom) => {
+          if (zoom === null || zoom === undefined) return;
+          const coords = (features[0].geometry as GeoJSON.Point).coordinates;
+          map.easeTo({ center: [coords[0], coords[1]], zoom: zoom + 1 });
+        }).catch(() => {});
+      }
+    };
+
     map.on("style.load", onStyleLoad);
     map.on("click", onMapClick);
     map.on("click", "camera-points", onCameraClick);
+    map.on("click", "camera-clusters", onClusterClick);
+    map.on("mouseenter", "camera-points", setCursorPointer);
+    map.on("mouseleave", "camera-points", resetCursor);
+    map.on("mouseenter", "camera-clusters", setCursorPointer);
+    map.on("mouseleave", "camera-clusters", resetCursor);
     map.on("click", "route-alternatives-line", onRouteClick);
     map.on("moveend", onMoveEnd);
     map.on("idle", onIdle);
@@ -308,11 +351,17 @@ export const MapContainer: React.FC<MapContainerProps> = ({
       map.off("style.load", onStyleLoad);
       map.off("click", onMapClick);
       map.off("click", "camera-points", onCameraClick);
+      map.off("click", "camera-clusters", onClusterClick);
+      map.off("mouseenter", "camera-points", setCursorPointer);
+      map.off("mouseleave", "camera-points", resetCursor);
+      map.off("mouseenter", "camera-clusters", setCursorPointer);
+      map.off("mouseleave", "camera-clusters", resetCursor);
       map.off("click", "route-alternatives-line", onRouteClick);
       map.off("moveend", onMoveEnd);
       map.off("idle", onIdle);
       map.remove();
       mapRef.current = null;
+      if (typeof window !== "undefined") delete (window as any).__safepath_map;
     };
   }, [updateCameras]);
 
@@ -410,8 +459,8 @@ export const MapContainer: React.FC<MapContainerProps> = ({
   }, [currentLocation, locationFocusToken]);
 
   return (
-    <div className="relative w-full h-full min-h-0 overflow-hidden bg-pearl-100" data-testid="route-map">
-      <div ref={containerRef} className="w-full h-full" aria-label="Bản đồ tuyến đường" />
+    <div className="relative w-full h-full min-h-0 overflow-hidden bg-pearl-100">
+      <div ref={containerRef} className="w-full h-full" aria-label="Bản đồ tuyến đường" data-testid="route-map" />
 
       {mapError && (
         <div role="alert" className="absolute bottom-12 left-3 z-20 rounded-2xl glass-panel-elevated p-3 text-sm text-ink-900 border border-rose-200">
@@ -431,29 +480,20 @@ export const MapContainer: React.FC<MapContainerProps> = ({
 
       {/* Floating Liquid Glass Controls: Floating Camera Toggle (No right-side "Vị trí của tôi" button) */}
       <div className="absolute top-3.5 right-14 z-10 flex items-center gap-2">
-        <button
-          type="button"
-          role="switch"
-          aria-checked={showCameras}
-          onClick={handleToggleCameras}
-          className={`glass-pill flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold transition-all duration-200 cursor-pointer ${
-            showCameras
-              ? "bg-white/95 text-indigo-600 border-indigo-200 shadow-glass ring-2 ring-indigo-400/20"
-              : "bg-white/75 text-ink-600 border-white/80 hover:bg-white/95 hover:text-ink-900"
-          }`}
-          aria-label="Hiển thị camera"
-          title={showCameras ? "Ẩn camera giao thông" : "Hiện camera giao thông"}
-        >
-          <Camera className={`h-4 w-4 ${showCameras ? "text-indigo-600" : "text-ink-400"}`} />
-          <span className="hidden sm:inline font-medium">Hiển thị camera</span>
-          <span
-            className={`inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-              showCameras ? "bg-indigo-100 text-indigo-700" : "bg-slate-100 text-ink-500"
-            }`}
-          >
-            {showCameras ? "Bật" : "Tắt"}
-          </span>
-        </button>
+        <GlassToggle
+          checked={showCameras}
+          onChange={handleToggleCameras}
+          label="Hiển thị camera"
+          filter={cameraFilter}
+          onFilterChange={(f) => {
+            setCameraFilter(f);
+            updateCameras();
+          }}
+          cameraCount={{
+            active: cameras.filter((c) => Number.isFinite(c.lng) && Number.isFinite(c.lat)).length,
+            total: cameras.length,
+          }}
+        />
       </div>
     </div>
   );

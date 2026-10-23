@@ -220,7 +220,10 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
   const imageUrl = getCameraImageUrl(camera.cam_id);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md animate-fadeIn">
+    <div
+      data-testid="camera-evidence-modal"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md animate-fadeIn"
+    >
       <div
         className="relative w-full max-w-2xl glass-panel-elevated rounded-3xl shadow-glass-elevated overflow-hidden flex flex-col border border-white/95 text-ink-900"
         onClick={(e) => e.stopPropagation()}
@@ -248,6 +251,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
 
           <button
             onClick={onClose}
+            aria-label="Đóng chi tiết camera"
             className="p-2 text-ink-400 hover:text-ink-800 hover:bg-slate-100 rounded-full transition"
             title="Đóng modal"
           >

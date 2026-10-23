@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback, useRef } from "react";
+import Link from "next/link";
 import {
   CameraEvidence,
   Coordinates,
@@ -20,6 +21,7 @@ import {
   reverseGeocode,
   searchSafeRoute,
 } from "../services/api";
+import { useAuth } from "../context/AuthContext";
 import { MapContainer } from "../components/MapContainer";
 import { CameraEvidenceModal } from "../components/CameraEvidenceModal";
 import { NavigationGuidance } from "../components/NavigationGuidance";
@@ -37,6 +39,9 @@ import {
   CheckCircle,
   CloudRain,
   Waves,
+  Sun,
+  Cloud,
+  User,
 } from "lucide-react";
 
 const HCMC_PRESETS: { name: string; coords: Coordinates }[] = [
@@ -49,12 +54,13 @@ const HCMC_PRESETS: { name: string; coords: Coordinates }[] = [
 ];
 
 export default function SafePathDashboard() {
+  const { user, addRouteHistory } = useAuth();
   const [cameras, setCameras] = useState<CameraEvidence[]>([]);
   const [, setUxState] = useState<NavigationUXState>("IDLE");
-  const [origin, setOrigin] = useState<Coordinates | null>(HCMC_PRESETS[0].coords);
-  const [originText, setOriginText] = useState<string>(HCMC_PRESETS[0].name);
-  const [destination, setDestination] = useState<Coordinates | null>(HCMC_PRESETS[2].coords);
-  const [destinationText, setDestinationText] = useState<string>(HCMC_PRESETS[2].name);
+  const [origin, setOrigin] = useState<Coordinates | null>(null);
+  const [originText, setOriginText] = useState<string>("");
+  const [destination, setDestination] = useState<Coordinates | null>(null);
+  const [destinationText, setDestinationText] = useState<string>("");
   const [selectedOriginPlace, setSelectedOriginPlace] = useState<PlaceResult | null>(null);
   const [selectedDestinationPlace, setSelectedDestinationPlace] = useState<PlaceResult | null>(null);
   const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
@@ -146,6 +152,14 @@ export default function SafePathDashboard() {
         setAlternativeRoutes(routes.filter((route) => route.route_id !== fastest.route_id));
         setSheetExpanded(true);
         setUxState("ROUTE_FOUND");
+        if (addRouteHistory) {
+          addRouteHistory({
+            originName: selectedOriginPlace?.name || originText || "Điểm xuất phát",
+            destName: selectedDestinationPlace?.name || destinationText || "Điểm đến",
+            distanceKm: parseFloat(fastest.total_distance_km.toFixed(1)),
+            durationMins: Math.round(fastest.estimated_time_mins),
+          });
+        }
       } catch (err: any) {
         if (requestId === requestSequenceRef.current) {
           const errMsg = err instanceof Error ? err.message : "Không thể tìm tuyến đường.";
@@ -363,27 +377,48 @@ export default function SafePathDashboard() {
       <div className="absolute bottom-[-10%] right-[-5%] w-[40vw] h-[40vw] rounded-full bg-gradient-to-tl from-lavender-200/40 via-soft-cyan/30 to-transparent blur-3xl pointer-events-none" />
 
       {/* Top Floating Glass Navigation Bar */}
-      <header className="h-14 glass-panel border-b border-white/80 px-5 flex items-center justify-between shrink-0 z-30 shadow-glass-sm">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-gradient-to-tr from-indigo-600 via-blue-600 to-sky-500 rounded-2xl shadow-md shadow-indigo-500/25 text-white">
-            <Navigation className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-base font-black tracking-tight text-ink-950">
-                SafePath<span className="aurora-gradient-text font-black">AI</span>
-              </h1>
-              <span className="text-[10px] font-bold tracking-wider px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/70 shadow-sm">
-                TP. Hồ Chí Minh
-              </span>
+      <header className="h-14 glass-panel border-b border-white/80 px-4 md:px-6 flex items-center justify-between shrink-0 z-30 shadow-glass-sm">
+        <div className="flex items-center gap-4">
+          <Link href="/" className="flex items-center gap-3 group">
+            <div className="p-2 bg-gradient-to-tr from-indigo-600 via-blue-600 to-sky-500 rounded-2xl shadow-md shadow-indigo-500/25 text-white group-hover:scale-105 transition-transform">
+              <Navigation className="w-5 h-5" />
             </div>
-            <p className="hidden md:block text-[11px] text-ink-500 leading-none mt-0.5 font-medium">
-              Lộ trình theo đường thực · Cảnh báo rủi ro tức thời
-            </p>
-          </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base font-black tracking-tight text-ink-950">
+                  SafePath<span className="aurora-gradient-text font-black">AI</span>
+                </h1>
+                <span className="text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/70 shadow-sm">
+                  2.0
+                </span>
+              </div>
+              <p className="hidden xl:block text-[11px] text-ink-500 leading-none mt-0.5 font-medium">
+                Lộ trình theo đường thực · Cảnh báo rủi ro tức thời
+              </p>
+            </div>
+          </Link>
+
+          {/* Quick Page Links */}
+          <nav className="hidden md:flex items-center gap-1.5 ml-2">
+            <span className="px-3 py-1.5 rounded-full text-xs font-bold text-indigo-700 bg-white/90 border border-indigo-200/80 shadow-glass-sm">
+              Bản đồ
+            </span>
+            <Link
+              href="/monitor"
+              className="px-3 py-1.5 rounded-full text-xs font-semibold text-ink-700 hover:text-indigo-600 hover:bg-white/70 transition cursor-pointer"
+            >
+              Quan trắc Camera
+            </Link>
+            <Link
+              href="/dashboard"
+              className="px-3 py-1.5 rounded-full text-xs font-semibold text-ink-700 hover:text-indigo-600 hover:bg-white/70 transition cursor-pointer"
+            >
+              Bảng điều khiển
+            </Link>
+          </nav>
         </div>
 
-        {/* Status Indicators */}
+        {/* Status Indicators & User Profile */}
         <div className="flex items-center gap-2.5">
           {/* Verified Cameras Counter Badge */}
           <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 glass-pill rounded-full text-xs font-semibold text-ink-700 border border-white/90">
@@ -394,7 +429,7 @@ export default function SafePathDashboard() {
 
           {/* WebSocket Live Indicator */}
           <div
-            className={`hidden md:flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${
+            className={`hidden lg:flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${
               wsConnected
                 ? "bg-emerald-50/90 border-emerald-200 text-emerald-700"
                 : "bg-amber-50/90 border-amber-200 text-amber-700"
@@ -403,6 +438,29 @@ export default function SafePathDashboard() {
             <Radio className={`w-3 h-3 ${wsConnected ? "animate-pulse" : ""}`} />
             <span>{wsConnected ? "Trực tiếp" : "Đang kết nối lại..."}</span>
           </div>
+
+          {/* User Account / Settings Link */}
+          <Link
+            href="/account"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/80 hover:bg-white border border-white/90 shadow-glass-sm transition text-xs font-bold text-ink-800 cursor-pointer"
+            title="Tài khoản và Cấu hình xe"
+          >
+            {user ? (
+              <>
+                <img
+                  src={user.avatar}
+                  alt={user.name}
+                  className="w-5 h-5 rounded-full border border-indigo-200 object-cover"
+                />
+                <span className="hidden sm:inline max-w-[90px] truncate">{user.name}</span>
+              </>
+            ) : (
+              <>
+                <User className="w-4 h-4 text-indigo-600" />
+                <span className="hidden sm:inline">Tài khoản</span>
+              </>
+            )}
+          </Link>
         </div>
       </header>
 
@@ -619,12 +677,22 @@ export default function SafePathDashboard() {
             <div className="glass-panel rounded-3xl p-3.5 space-y-2.5 border border-white/90 shadow-glass">
               <div className="flex items-center justify-between border-b border-slate-200/70 pb-2">
                 <span className="text-[11px] font-bold text-ink-800 uppercase tracking-wider flex items-center gap-1.5">
-                  <CloudRain className="w-3.5 h-3.5 text-indigo-600" />
+                  {weatherTide?.rain_mm_per_hour && weatherTide.rain_mm_per_hour > 0 ? (
+                    <CloudRain className="w-3.5 h-3.5 text-blue-500 animate-pulse" />
+                  ) : weatherTide?.weather_code === 0 || weatherTide?.weather_code === 1 ? (
+                    <Sun className="w-3.5 h-3.5 text-amber-500" />
+                  ) : (
+                    <Cloud className="w-3.5 h-3.5 text-indigo-500" />
+                  )}
                   Thời tiết & Thủy văn Thực địa
                 </span>
                 <span className="text-[10px] text-ink-400 font-mono">
                   {weatherTide?.timestamp
-                    ? new Date(weatherTide.timestamp).toLocaleTimeString("vi-VN")
+                    ? (() => {
+                        const date = new Date(weatherTide.timestamp);
+                        const mins = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+                        return mins < 60 ? `Cập nhật ${mins} phút trước` : date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+                      })()
                     : "Đang kết nối"}
                 </span>
               </div>
@@ -634,10 +702,15 @@ export default function SafePathDashboard() {
                 <div className="bg-white/80 border border-slate-200/80 rounded-2xl p-2.5 space-y-1 shadow-glass-sm">
                   <span className="text-[10px] text-ink-500 block font-medium">Lượng mưa (Open-Meteo)</span>
                   <div className="font-black text-sm text-ink-950">
-                    {weatherTide?.rain_mm_per_hour !== null &&
-                    weatherTide?.rain_mm_per_hour !== undefined
-                      ? `${weatherTide.rain_mm_per_hour.toFixed(1)} mm/h`
-                      : "Chưa có dữ liệu"}
+                    {weatherTide?.rain_mm_per_hour !== null && weatherTide?.rain_mm_per_hour !== undefined ? (
+                      weatherTide.rain_mm_per_hour === 0 ? (
+                        <span>0.0 mm/h <span className="text-[10px] font-normal text-emerald-600 block">(Không mưa)</span></span>
+                      ) : (
+                        <span>{weatherTide.rain_mm_per_hour.toFixed(1)} mm/h <span className="text-[10px] font-normal text-blue-600 block">(Có mưa)</span></span>
+                      )
+                    ) : (
+                      "Chưa có dữ liệu"
+                    )}
                   </div>
                   <span className="text-[10px] text-ink-400 block font-medium">
                     Trạng thái: <strong>{weatherTide?.rain_status || "UNAVAILABLE"}</strong>
@@ -651,10 +724,11 @@ export default function SafePathDashboard() {
                     Thủy triều (Phú An)
                   </span>
                   <div className="font-black text-sm text-ink-950">
-                    {weatherTide?.tide_level_meters !== null &&
-                    weatherTide?.tide_level_meters !== undefined
-                      ? `${weatherTide.tide_level_meters.toFixed(2)} m`
-                      : "Chưa có bản tin"}
+                    {weatherTide?.tide_level_meters !== null && weatherTide?.tide_level_meters !== undefined ? (
+                      <span>{weatherTide.tide_level_meters.toFixed(2)} m</span>
+                    ) : (
+                      <span className="text-xs text-ink-500">Chưa có bản tin mới</span>
+                    )}
                   </div>
                   <span className="text-[10px] text-ink-400 block font-medium">
                     Hệ mốc: <strong>Hòn Dấu</strong>
@@ -670,6 +744,10 @@ export default function SafePathDashboard() {
                   </span>
                 </div>
               )}
+
+              <div className="pt-1 text-[9px] text-ink-400 text-center font-mono">
+                Nguồn: Open-Meteo & Trạm thủy văn Phú An
+              </div>
             </div>
           </div>
         </aside>

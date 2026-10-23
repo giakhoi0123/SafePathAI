@@ -77,3 +77,72 @@ def test_yolo26_heads_have_distinct_decoders():
 
     with pytest.raises(ValueError):
         decode_yolo26_output(np.zeros((1, 25200, 85), dtype=np.float32))
+
+
+def test_yolo26_detection_pipeline_nms_free():
+    detector = VehicleDetector(vision.DEFAULT_YOLO_PATH, fallback_to_heuristic=False)
+    # Mock ONNX session to simulate YOLO26 NMS-free [1, 300, 6] output
+    class MockTensor:
+        def __init__(self, name, dtype_str="tensor(float)"):
+            self.name = name
+            self.type = dtype_str
+
+    class MockSession:
+        def get_inputs(self):
+            return [MockTensor("images")]
+
+        def get_outputs(self):
+            return [MockTensor("output0")]
+
+        def run(self, output_names, input_feed):
+            out = np.zeros((1, 300, 6), dtype=np.float32)
+            # Add car (class 2) with score 0.85
+            out[0, 0] = [100, 100, 200, 200, 0.85, 2]
+            # Add motorcycle (class 3) with score 0.90
+            out[0, 1] = [300, 300, 350, 400, 0.90, 3]
+            return [out]
+
+    detector.session = MockSession()
+    detector.model_status = "VERIFIED_ONNX_INFERENCE"
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    res = detector.detect_vehicles(frame)
+    assert res.is_available is True
+    assert res.vehicle_count == 2
+    assert res.model_status == "VERIFIED_ONNX_INFERENCE"
+    class_names = [v.cls_name for v in res.vehicles]
+    assert "car" in class_names
+    assert "motorcycle" in class_names
+
+
+def test_yolo26_detection_pipeline_one_to_many():
+    detector = VehicleDetector(vision.DEFAULT_YOLO_PATH, fallback_to_heuristic=False)
+    class MockTensor:
+        def __init__(self, name, dtype_str="tensor(float)"):
+            self.name = name
+            self.type = dtype_str
+
+    class MockSession:
+        def get_inputs(self):
+            return [MockTensor("images")]
+
+        def get_outputs(self):
+            return [MockTensor("output0")]
+
+        def run(self, output_names, input_feed):
+            out = np.zeros((1, 84, 8400), dtype=np.float32)
+            # Center at (150, 150), w=100, h=100 -> x1=100, y1=100, x2=200, y2=200
+            out[0, :4, 0] = [150, 150, 100, 100]
+            # bus (class 5): index 4 + 5 = 9
+            out[0, 9, 0] = 0.88
+            return [out]
+
+    detector.session = MockSession()
+    detector.model_status = "VERIFIED_ONNX_INFERENCE"
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    res = detector.detect_vehicles(frame)
+    assert res.is_available is True
+    assert res.vehicle_count == 1
+    assert res.vehicles[0].cls_name == "bus"
+

@@ -20,6 +20,8 @@ test("OSRM route appears on the live map", async ({ page }) => {
   page.on("pageerror", (err) => console.error(`[BROWSER ERROR]`, err));
 
   await page.goto("/");
+  await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
+  await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: "Tìm tuyến đường" }).click();
   await expect(page.getByText("Tuyến đang chọn")).toBeVisible({ timeout: 15000 });
   await expect(page.locator(".maplibregl-canvas")).toBeVisible();

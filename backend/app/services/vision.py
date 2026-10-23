@@ -310,7 +310,7 @@ class VehicleDetector:
 
     def detect_vehicles(
         self,
-        prep: PreprocessResult,
+        prep: Union[PreprocessResult, np.ndarray],
         conf_threshold: float = 0.25,
         nms_threshold: float = 0.45,
     ) -> VehicleDetectionResult:
@@ -318,6 +318,21 @@ class VehicleDetector:
         Executes real ONNX inference on camera frame.
         Counts observed vehicles at this snapshot instant (NOT traffic velocity).
         """
+        if isinstance(prep, np.ndarray):
+            h, w = prep.shape[:2]
+            mask = np.ones((h, w), dtype=np.uint8) * 255
+            prep = PreprocessResult(
+                original_image=prep,
+                roi_mask=mask,
+                roi_image=prep,
+                roi_pixel_count=h * w,
+                mean_luminance=100.0,
+                laplacian_var=100.0,
+                is_dark=False,
+                is_blurry=False,
+                height=h,
+                width=w,
+            )
         if self.session is not None and self.model_status == "VERIFIED_ONNX_INFERENCE":
             res = self._detect_onnx(prep, conf_threshold=conf_threshold, nms_threshold=nms_threshold)
             # If ONNX detects vehicles or heuristic fallback is disabled, return real inference
@@ -363,46 +378,69 @@ class VehicleDetector:
         # 2. Forward pass via ONNX Runtime
         input_name = self.session.get_inputs()[0].name
         output_name = self.session.get_outputs()[0].name
-        out = self.session.run([output_name], {input_name: blob})[0]  # [1, 25200, 85]
-        if out.shape != (1, 25200, 85):
-            raise ValueError(f"Expected YOLOv5 [1,25200,85], got {out.shape}; YOLO26 requires its own decoder")
+        out = self.session.run([output_name], {input_name: blob})[0]
 
-        detections = out[0]  # [25200, 85]
         boxes: List[List[int]] = []
         confidences: List[float] = []
         class_ids: List[int] = []
 
-        # 3. Decode candidate anchor boxes
-        for row in detections:
-            obj_conf = float(row[4])
-            if obj_conf < conf_threshold:
-                continue
+        if out.shape == (1, 25200, 85):
+            # 3a. Decode YOLOv5 candidate anchor boxes [1, 25200, 85]
+            detections = out[0]
+            for row in detections:
+                obj_conf = float(row[4])
+                if obj_conf < conf_threshold:
+                    continue
 
-            class_scores = row[5:]
-            class_id = int(np.argmax(class_scores))
-            class_conf = float(class_scores[class_id])
-            total_score = obj_conf * class_conf
+                class_scores = row[5:]
+                class_id = int(np.argmax(class_scores))
+                class_conf = float(class_scores[class_id])
+                total_score = obj_conf * class_conf
 
-            if total_score >= conf_threshold and class_id in COCO_VEHICLE_CLASSES:
-                cx, cy, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                # Unpad coordinates back to original image scale
-                x1 = int(round((cx - w / 2.0 - dw) / r))
-                y1 = int(round((cy - h / 2.0 - dh) / r))
-                box_w = int(round(w / r))
-                box_h = int(round(h / r))
+                if total_score >= conf_threshold and class_id in COCO_VEHICLE_CLASSES:
+                    cx, cy, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
+                    x1 = int(round((cx - w / 2.0 - dw) / r))
+                    y1 = int(round((cy - h / 2.0 - dh) / r))
+                    box_w = int(round(w / r))
+                    box_h = int(round(h / r))
 
-                # Clamp to image boundaries
-                x1 = max(0, min(w_orig - 1, x1))
-                y1 = max(0, min(h_orig - 1, y1))
-                box_w = max(1, min(w_orig - x1, box_w))
-                box_h = max(1, min(h_orig - y1, box_h))
+                    x1 = max(0, min(w_orig - 1, x1))
+                    y1 = max(0, min(h_orig - 1, y1))
+                    box_w = max(1, min(w_orig - x1, box_w))
+                    box_h = max(1, min(h_orig - y1, box_h))
 
-                boxes.append([x1, y1, box_w, box_h])
-                confidences.append(total_score)
-                class_ids.append(class_id)
+                    boxes.append([x1, y1, box_w, box_h])
+                    confidences.append(total_score)
+                    class_ids.append(class_id)
 
-        # 4. Non-Maximum Suppression (NMS)
-        indices = cv2.dnn.NMSBoxes(boxes, confidences, conf_threshold, nms_threshold)
+            indices = cv2.dnn.NMSBoxes(boxes, confidences, conf_threshold, nms_threshold)
+        elif out.shape[1:] in ((300, 6), (84, 8400)):
+            # 3b. Decode YOLO26 detection heads ([1, 300, 6] or [1, 84, 8400])
+            decoded_boxes, scores, classes, needs_nms = decode_yolo26_output(out, conf_threshold=conf_threshold)
+            for i in range(len(decoded_boxes)):
+                cid = int(classes[i])
+                if cid in COCO_VEHICLE_CLASSES:
+                    x1_box, y1_box, x2_box, y2_box = decoded_boxes[i]
+                    x1 = int(round((x1_box - dw) / r))
+                    y1 = int(round((y1_box - dh) / r))
+                    x2 = int(round((x2_box - dw) / r))
+                    y2 = int(round((y2_box - dh) / r))
+
+                    x1 = max(0, min(w_orig - 1, x1))
+                    y1 = max(0, min(h_orig - y1, y1))
+                    box_w = max(1, min(w_orig - x1, x2 - x1))
+                    box_h = max(1, min(h_orig - y1, y2 - y1))
+
+                    boxes.append([x1, y1, box_w, box_h])
+                    confidences.append(float(scores[i]))
+                    class_ids.append(cid)
+
+            if needs_nms and boxes:
+                indices = cv2.dnn.NMSBoxes(boxes, confidences, conf_threshold, nms_threshold)
+            else:
+                indices = np.arange(len(boxes))
+        else:
+            raise ValueError(f"Unsupported YOLO output shape: {out.shape}")
 
         detected_vehicles: List[DetectedVehicle] = []
         total_weight = 0.0

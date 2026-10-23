@@ -13,6 +13,8 @@ test("live OSRM alternatives select their own geometry, camera toggle preserves 
   const routes = [data, ...(data.alternative_routes || [])];
   await page.goto("/");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
+  await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
+  await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: "Tìm tuyến đường", exact: true }).click();
   await expect(page.locator("[data-selected-route-id]")).toBeVisible({ timeout: 20000 });
   await expect(page.getByRole("link", { name: "OpenStreetMap" }).first()).toBeVisible();
@@ -61,6 +63,7 @@ test("one live route reports no alternative", async ({ page }) => {
   expect(data.alternative_routes || []).toHaveLength(0);
   await page.goto("/");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
+  await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
   await page.getByRole("button", { name: "Sân bay Tân Sơn Nhất" }).click();
   await expect(page.getByTestId("destination-combobox").getByRole("combobox")).toHaveValue("Sân bay Tân Sơn Nhất");
   await page.getByRole("button", { name: "Đảo chiều lộ trình" }).click();
@@ -76,6 +79,8 @@ test("mobile sheet leaves map visible without horizontal overflow", async ({ pag
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Mở bảng tuyến đường" })).toBeVisible();
   await page.getByRole("button", { name: "Mở bảng tuyến đường" }).click();
+  await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
+  await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: "Tìm tuyến đường", exact: true }).click();
   await expect(page.locator("[data-route-vertices]")).toBeVisible({ timeout: 20000 });
   const metrics = await page.evaluate(() => ({ documentWidth: document.documentElement.scrollWidth, viewport: innerWidth }));
@@ -94,6 +99,8 @@ test("404 and 503 show retry without fabricated geometry", async ({ page }) => {
     await page.route("**/api/v1/routes/search", async (route) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ detail: { code, message: "Tuyến không khả dụng" } }) }));
     await page.goto("/");
     await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
+    await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
+    await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
     await page.getByRole("button", { name: "Tìm tuyến đường", exact: true }).click();
     await expect(page.getByRole("button", { name: "Thử lại" })).toBeVisible();
     await expect(page.locator("[data-route-vertices]")).toHaveCount(0);

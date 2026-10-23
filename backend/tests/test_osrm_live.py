@@ -67,6 +67,7 @@ async def test_api_reports_provider_down_without_route(monkeypatch):
     app.dependency_overrides[get_db] = no_db_connection
     monkeypatch.setattr(routing.settings, "OSRM_BASE_URL", "http://127.0.0.1:1")
     monkeypatch.setattr(routing, "_osrm_circuit_open_until", 0.0)
+    monkeypatch.setattr("backend.app.main.get_redis_client", lambda: None)
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post("/api/v1/routes/search", json={
