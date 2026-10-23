@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import json
 import os
 import pytest
+import inspect
 import httpx
 import respx
 from sqlalchemy import text
@@ -20,6 +21,7 @@ from backend.app.db.session import AsyncSessionLocal, SessionLocal, get_redis_cl
 from backend.app.schemas.contracts import (
     CameraEvidence,
     DataSourceStatus,
+    EvidenceEligibility,
     RiskLevel,
     RouteSegmentRisk,
     SafeRouteResponse,
@@ -110,7 +112,7 @@ class TestRealTideAndDatum:
         redis = get_redis_client()
         await redis.delete(REDIS_TIDE_BULLETIN_KEY)
         try:
-            signal = await fetch_tide_signal(simulate_high_tide=False, redis_client=redis)
+            signal = await fetch_tide_signal(redis_client=redis)
             assert signal.tide_status == "TIDE_UNAVAILABLE"
             assert signal.tide_level_meters is None
             assert signal.is_high_tide_alert is None
@@ -140,7 +142,7 @@ class TestRealTideAndDatum:
             assert signal.tide_datum == DATUM_HON_DAU_VN2000
 
             # 2. Read back via fetch_tide_signal
-            cached_signal = await fetch_tide_signal(simulate_high_tide=False, redis_client=redis)
+            cached_signal = await fetch_tide_signal(redis_client=redis)
             assert cached_signal.tide_status == "LIVE"
             assert cached_signal.tide_level_meters == 1.62
             assert cached_signal.is_high_tide_alert is True
@@ -150,12 +152,10 @@ class TestRealTideAndDatum:
             await redis.aclose()
 
     @pytest.mark.asyncio
-    async def test_simulated_tide_explicitly_marked(self):
-        """Simulation override must be clearly flagged as SIMULATED, never masquerading as LIVE."""
-        signal = await fetch_tide_signal(simulate_high_tide=True)
-        assert signal.tide_status == "SIMULATED"
-        assert signal.tide_level_meters == 1.72
-        assert signal.is_high_tide_alert is True
+    async def test_runtime_tide_has_no_simulation_controls(self):
+        """The production tide function has no simulation parameters."""
+        assert "simulate_high_tide" not in inspect.signature(fetch_tide_signal).parameters
+        assert "tide_override_meters" not in inspect.signature(fetch_tide_signal).parameters
 
 
 # ==============================================================================
@@ -203,8 +203,8 @@ class TestMultiCriteriaRiskScoring:
         assert res.risk_level == RiskLevel.UNKNOWN
         assert res.risk_score is None
 
-    def test_historical_flood_under_heavy_rain_becomes_critical(self):
-        """Documented municipal flood street + heavy rain (>= 30 mm/h) = CRITICAL risk."""
+    def test_historical_flood_under_heavy_rain_remains_unobserved(self):
+        """Regional rain and historical metadata do not measure current road water."""
         segment = {
             "osm_way_id": 999002,
             "edge_index": 1,
@@ -216,16 +216,18 @@ class TestMultiCriteriaRiskScoring:
         heavy_rain = WeatherTideSignal(
             rain_mm_per_hour=45.0,
             rain_status="LIVE",
+            rain_observed_at=datetime.now(timezone.utc),
+            source_url="https://api.open-meteo.com/v1/forecast",
             timestamp=datetime.now(timezone.utc),
         )
         res = calculate_segment_risk(segment, camera_evidences=[], weather_tide=heavy_rain)
-        assert res.risk_level == RiskLevel.CRITICAL
-        assert res.risk_score is not None and res.risk_score >= 75.0
+        assert res.risk_level == RiskLevel.UNKNOWN
+        assert res.risk_score is None
         assert res.weather_risk == "HEAVY_RAIN"
         assert res.historical_flood_prone is True
 
-    def test_historical_flood_under_high_tide_alert_becomes_critical(self):
-        """Documented flood street + high tide alert = CRITICAL risk."""
+    def test_historical_flood_under_high_tide_alert_remains_unobserved(self):
+        """Station tide is context, not a road-level flood observation."""
         segment = {
             "osm_way_id": 999003,
             "edge_index": 1,
@@ -240,15 +242,16 @@ class TestMultiCriteriaRiskScoring:
             tide_level_meters=1.68,
             tide_status="LIVE",
             is_high_tide_alert=True,
+            source_url="https://kttv.gov.vn/bulletin",
             timestamp=datetime.now(timezone.utc),
         )
         res = calculate_segment_risk(segment, camera_evidences=[], weather_tide=tide_alert)
-        assert res.risk_level == RiskLevel.CRITICAL
-        assert res.risk_score is not None and res.risk_score >= 75.0
-        assert res.historical_flood_cause == "TIDAL_AND_HEAVY_RAIN"
+        assert res.risk_level == RiskLevel.UNKNOWN
+        assert res.risk_score is None
+        assert res.historical_flood_cause == "HIGH_TIDE"
 
-    def test_historical_flood_under_clear_weather_and_no_tide_is_safe(self):
-        """Historical flood street under verified dry weather & calm tide is currently SAFE."""
+    def test_historical_flood_under_clear_weather_and_no_tide_is_unknown(self):
+        """A dry regional bulletin cannot establish a safe road."""
         segment = {
             "osm_way_id": 999004,
             "edge_index": 1,
@@ -266,8 +269,8 @@ class TestMultiCriteriaRiskScoring:
             timestamp=datetime.now(timezone.utc),
         )
         res = calculate_segment_risk(segment, camera_evidences=[], weather_tide=clear_weather)
-        assert res.risk_level == RiskLevel.SAFE
-        assert res.risk_score == 15.0  # Baseline advisory
+        assert res.risk_level == RiskLevel.UNKNOWN
+        assert res.risk_score is None
         assert res.historical_flood_prone is True
 
     def test_historical_flood_with_unobserved_weather_remains_unknown(self):
@@ -293,7 +296,7 @@ class TestMultiCriteriaRiskScoring:
         assert res.risk_score is None
 
     def test_verified_camera_severe_flood_overrides_everything(self):
-        """Direct camera observation of deep water triggers immediate CRITICAL."""
+        """A validated road-water pixel observation can flag a critical hazard."""
         segment = {
             "osm_way_id": 999006,
             "edge_index": 2,
@@ -309,6 +312,7 @@ class TestMultiCriteriaRiskScoring:
             lng=106.71,
             coordinate_source_url="https://example.org/gps",
             spatial_match_status="OBSERVED_SEGMENT_VERIFIED",
+            evidence_eligibility=EvidenceEligibility.ROUTING_ELIGIBLE,
             observed_osm_way_id=999006,
             observed_edge_index=2,
             view_verification_source_url="https://example.org/view",
@@ -362,23 +366,13 @@ class TestRiskAwareRoutingReranking:
                 await redis.aclose()
 
     @pytest.mark.asyncio
-    async def test_critical_flood_warning_on_unavoidable_route(self):
-        """When route passes a critical segment under heavy storm, warning is issued."""
+    async def test_candidate_edges_do_not_claim_current_flood_risk(self):
+        """A nearby historical point cannot make an unmatched OSRM step critical."""
         # Query route near Nguyễn Hữu Cảnh (Bình Thạnh)
         origin_lat, origin_lng = 10.7950, 106.7180
         dest_lat, dest_lng = 10.8010, 106.7250
 
         redis = get_redis_client()
-        # Seed heavy rain storm in Redis
-        storm = WeatherTideSignal(
-            rain_mm_per_hour=60.0,
-            rain_status="LIVE",
-            tide_level_meters=1.65,
-            tide_status="LIVE",
-            is_high_tide_alert=True,
-            timestamp=datetime.now(timezone.utc),
-        )
-        await redis.set("env:current_weather_tide", storm.model_dump_json(), ex=60)
 
         async with AsyncSessionLocal() as session:
             try:
@@ -392,11 +386,9 @@ class TestRiskAwareRoutingReranking:
                 )
                 assert routes
                 best_route = routes[0]
-                if best_route.critical_segments_count > 0:
-                    assert best_route.overall_risk == RiskLevel.CRITICAL
-                    assert best_route.route_status == "ROUTE_CRITICAL_RISK_WARNING"
-                    assert "CẢNH BÁO" in best_route.ai_explanation
+                assert best_route.overall_risk == RiskLevel.UNKNOWN
+                assert best_route.critical_segments_count == 0
+                assert all(step.osm_way_id is None for step in best_route.segments)
             finally:
-                await redis.delete("env:current_weather_tide")
                 await redis.aclose()
 

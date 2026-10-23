@@ -287,7 +287,7 @@ class TestMCPExplanationModule:
         explanation = await generate_route_explanation(r_rec, [r_alt], weather=weather)
         assert isinstance(explanation, str)
         assert "Điện Biên Phủ" in explanation
-        assert "TTH 145" in explanation or "Nguyễn Hữu Cảnh" in explanation
-        assert "45%" in explanation
-        assert "52 phương tiện" in explanation or "52 xe" in explanation or "triều cường" in explanation
+        assert "45%" not in explanation  # camera has no verified routing provenance
+        assert "52 phương tiện" not in explanation  # a count alone is not congestion
+        assert "an toàn tuyệt đối" not in explanation
 

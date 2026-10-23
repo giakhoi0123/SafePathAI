@@ -39,6 +39,7 @@ async def test_real_osrm_geometry_and_metrics(points):
 async def test_provider_down_returns_structured_error(monkeypatch):
     import backend.app.services.routing as routing
     monkeypatch.setattr(routing.settings, "OSRM_BASE_URL", "http://127.0.0.1:1")
+    monkeypatch.setattr(routing, "_osrm_cache_key", lambda *args: None)
     monkeypatch.setattr(routing, "_osrm_circuit_open_until", 0.0)
     with pytest.raises(RoutingError) as error:
         await _get_osrm_raw_routes(*PAIRS[0])

@@ -19,6 +19,7 @@ from backend.app.db.session import get_redis_client
 from backend.app.schemas.contracts import (
     CameraEvidence,
     DataSourceStatus,
+    EvidenceEligibility,
     RiskLevel,
 )
 from backend.app.services.vision import (
@@ -208,7 +209,8 @@ class TestEndToEndVisionPipeline:
 
         assert isinstance(evidence_dry, CameraEvidence)
         assert evidence_dry.cam_id == "58af8b69bd82540010390c28"
-        assert evidence_dry.risk_level in (RiskLevel.SAFE, RiskLevel.MODERATE)
+        assert evidence_dry.risk_level == RiskLevel.UNKNOWN
+        assert evidence_dry.evidence_eligibility == EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
         assert 0.0 <= evidence_dry.flood_ratio <= 1.0
         assert 0.0 <= evidence_dry.traffic_density_score <= 1.0
 
@@ -233,7 +235,7 @@ class TestEndToEndVisionPipeline:
             cam_meta=cam_meta_flood,
             storage_dir=test_workspace["dir"],
         )
-        assert evidence_flood.risk_level == RiskLevel.CRITICAL
+        assert evidence_flood.risk_level == RiskLevel.UNKNOWN
         assert evidence_flood.flood_ratio >= 0.25
 
 
@@ -270,7 +272,7 @@ class TestRedisVisionPersistence:
         hash_data = await redis_client.hgetall(hash_key)
         assert hash_data is not None
         assert hash_data["cam_id"] == "test_redis_cam_001"
-        assert hash_data["risk_level"] == RiskLevel.CRITICAL.value
+        assert hash_data["risk_level"] == RiskLevel.UNKNOWN.value
         assert float(hash_data["flood_ratio"]) >= 0.25
 
         # Verify Redis Stream: stream:camera_updates
@@ -278,7 +280,7 @@ class TestRedisVisionPersistence:
         assert len(stream_events) > 0
         event_id, event_fields = stream_events[0]
         assert event_fields["cam_id"] == "test_redis_cam_001"
-        assert event_fields["risk_level"] == RiskLevel.CRITICAL.value
+        assert event_fields["risk_level"] == RiskLevel.UNKNOWN.value
         assert "flood_ratio" in event_fields
 
         # Cleanup
@@ -314,5 +316,5 @@ class TestRedisVisionPersistence:
         assert len(results) == 2
         assert results[0].cam_id == "batch_cam_1"
         assert results[1].cam_id == "batch_cam_2"
-        assert results[1].risk_level == RiskLevel.CRITICAL
+        assert results[1].risk_level == RiskLevel.UNKNOWN
 

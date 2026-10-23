@@ -1,7 +1,9 @@
 """OSRM driving candidates and evidence coverage for Ho Chi Minh City."""
 
+import asyncio
 import json
 import hashlib
+from functools import lru_cache
 import logging
 import math
 import os
@@ -36,6 +38,12 @@ CRITICAL_FLOOD_PENALTY_MINUTES = 999.0
 HCMC_BOUNDS = (106.30, 10.35, 107.10, 11.20)  # west, south, east, north
 _osrm_circuit_open_until = 0.0
 OSRM_CACHE_TTL_SECONDS = 60
+
+
+@lru_cache(maxsize=512)
+def _edge_cache_lock(key: str) -> asyncio.Lock:
+    """One cold graph lookup per endpoint key in this API process."""
+    return asyncio.Lock()
 
 
 def _haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -333,6 +341,7 @@ async def _batched_spatial_context(
     routes: list[dict[str, Any]],
     db_session: Union[AsyncSession, Session],
     redis_client: Optional[Redis],
+    spatial_cache_key: Optional[str] = None,
 ) -> tuple[dict[tuple[int, int], list[dict[str, int]]], dict[tuple[int, int], list[CameraEvidence]], bool, bool]:
     """Two PostGIS queries for all OSRM steps, then one Redis MGET for camera state.
 
@@ -383,13 +392,44 @@ async def _batched_spatial_context(
     cameras: dict[tuple[int, int], list[CameraEvidence]] = {}
     edges_available = True
     cameras_available = True
-    try:
-        result = await db_session.execute(edge_sql, params) if isinstance(db_session, AsyncSession) else db_session.execute(edge_sql, params)
-        for row in result.fetchall():
-            edges.setdefault((row.route_idx, row.step_idx), []).append({"osm_way_id": int(row.osm_way_id), "edge_index": int(row.edge_index)})
-    except Exception as exc:
-        edges_available = False
-        logger.warning("Batched road candidates unavailable: %s", exc)
+    async def load_cached_edges() -> bool:
+        nonlocal edges
+        if not spatial_cache_key or redis_client is None:
+            return False
+        try:
+            raw_edges = await redis_client.get(f"{spatial_cache_key}:edges")
+            if raw_edges:
+                encoded = json.loads(raw_edges)
+                if isinstance(encoded, dict):
+                    edges = {tuple(map(int, key.split(":"))): value for key, value in encoded.items()}
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def query_and_cache_edges() -> None:
+        nonlocal edges_available
+        try:
+            result = await db_session.execute(edge_sql, params) if isinstance(db_session, AsyncSession) else db_session.execute(edge_sql, params)
+            for row in result.fetchall():
+                edges.setdefault((row.route_idx, row.step_idx), []).append({"osm_way_id": int(row.osm_way_id), "edge_index": int(row.edge_index)})
+            if spatial_cache_key and redis_client is not None:
+                encoded = {f"{key[0]}:{key[1]}": value for key, value in edges.items()}
+                try:
+                    await redis_client.set(f"{spatial_cache_key}:edges", json.dumps(encoded), ex=300)
+                except Exception:
+                    pass
+        except Exception as exc:
+            edges_available = False
+            logger.warning("Batched road candidates unavailable: %s", exc)
+
+    if not await load_cached_edges():
+        if spatial_cache_key:
+            async with _edge_cache_lock(spatial_cache_key):
+                if not await load_cached_edges():
+                    await query_and_cache_edges()
+        else:
+            await query_and_cache_edges()
 
     try:
         result = await db_session.execute(camera_sql, params) if isinstance(db_session, AsyncSession) else db_session.execute(camera_sql, params)
@@ -446,38 +486,43 @@ async def _batched_spatial_context(
 async def find_safe_route(
     origin_lat: float, origin_lng: float, dest_lat: float, dest_lng: float,
     db_session: Union[AsyncSession, Session], redis_client: Optional[Redis] = None,
+    osrm_client: Optional[httpx.AsyncClient] = None, request_id: Optional[str] = None,
 ) -> list[SafeRouteResponse]:
-    """Return actual OSRM candidates reranked by multi-criteria verified risk.
-
-    - Distance and estimated travel time come strictly from raw OSRM metrics.
-    - Ranking cost prioritizes routes with zero critical flooding without distorting the ETA.
-    - If all candidates traverse an unavoidable critical flood point, a warning is issued.
-    """
-    raw_routes = await _get_osrm_raw_routes(origin_lat, origin_lng, dest_lat, dest_lng)
-    
-    # Ingest / fetch real hydrometeorological signal
-    weather_tide: Optional[WeatherTideSignal] = None
-    if redis_client is not None:
+    """Return real OSRM routes; nearby OSM Ways remain unverified candidates."""
+    started_at = time.perf_counter()
+    cache_key = _osrm_cache_key(origin_lat, origin_lng, dest_lat, dest_lng)
+    raw_routes = None
+    cache_hit = False
+    if cache_key and redis_client is not None:
         try:
-            weather_tide = await get_cached_weather_tide(redis_client)
+            cached = await redis_client.get(cache_key)
+            if cached:
+                candidate = json.loads(cached)
+                if isinstance(candidate, list) and candidate and all(_valid_route(route) for route in candidate):
+                    raw_routes = candidate
+                    cache_hit = True
         except Exception:
-            weather_tide = None
-    if weather_tide is None:
-        try:
-            weather_tide = await get_combined_weather_tide(
-                lat=origin_lat, lng=origin_lng, redis_client=redis_client
-            )
-        except Exception as exc:
-            logger.warning("Failed to obtain live weather/tide in routing: %s", exc)
-            weather_tide = None
+            pass
+    if raw_routes is None:
+        raw_routes = await _get_osrm_raw_routes(origin_lat, origin_lng, dest_lat, dest_lng, client=osrm_client)
+        if cache_key and redis_client is not None:
+            try:
+                await redis_client.set(cache_key, json.dumps(raw_routes, separators=(",", ":")), ex=OSRM_CACHE_TTL_SECONDS)
+            except Exception:
+                pass
+    osrm_done_at = time.perf_counter()
+    edges_by_step, cameras_by_step, edges_available, cameras_available = await _batched_spatial_context(raw_routes, db_session, redis_client, cache_key)
+    db_done_at = time.perf_counter()
 
     responses: list[SafeRouteResponse] = []
-    for route in raw_routes:
-        coords = route["geometry"]["coordinates"]
-        camera_count = await _count_cameras_in_corridor(coords, db_session)
+    explanation_elapsed = 0.0
+    for route_idx, route in enumerate(raw_routes):
+        camera_count = len({camera.cam_id for (ri, _), cams in cameras_by_step.items() if ri == route_idx for camera in cams}) if cameras_available else None
         segments: list[RouteSegmentRisk] = []
+        step_idx = -1
         for leg in route.get("legs", []):
             for step in leg.get("steps", []):
+                step_idx += 1
                 geometry = step.get("geometry")
                 if not _valid_geometry(geometry):
                     continue
@@ -498,132 +543,47 @@ async def find_safe_route(
                     "maneuver_location": maneuver_location,
                     "maneuver_exit": maneuver.get("exit") if isinstance(maneuver.get("exit"), int) and maneuver.get("exit") > 0 else None,
                 }
-
-                segment_camera_count = await _count_cameras_in_corridor(geometry["coordinates"], db_session)
-                edge_candidates = await _edge_candidates_for_step(geometry["coordinates"], db_session)
-                road_candidates = list(dict.fromkeys(edge["osm_way_id"] for edge in edge_candidates or []))
-                
-                # Check for documented municipal flood points
-                flood_prone_way_ids = await _get_flood_prone_way_ids(road_candidates, db_session)
-                is_flood_prone = bool(flood_prone_way_ids)
-
-                # Fetch any verified or corridor cameras
-                step_cameras = await _get_cameras_for_step(geometry["coordinates"], db_session, redis_client)
-
-                segment_coverage = "SPATIALLY_NEAR_UNVERIFIED_VIEW" if segment_camera_count else "NO_VERIFIED_CAMERA_GPS"
-                if segment_camera_count is None:
-                    segment_coverage = "CORRIDOR_DATA_UNAVAILABLE"
-
-                if road_candidates and distance > 0:
-                    try:
-                        step_risk = calculate_segment_risk(
-                            segment={
-                                "osm_way_id": road_candidates[0],
-                                "edge_index": edge_candidates[0]["edge_index"] if edge_candidates else None,
-                                "street_name": step.get("name") or None,
-                                "length_meters": distance,
-                                "source_url": "https://download.geofabrik.de/asia/vietnam-latest.osm.pbf",
-                                "is_flood_prone_history": True if is_flood_prone else None,
-                            },
-                            camera_evidences=step_cameras,
-                            weather_tide=weather_tide,
-                        )
-                        step_risk.geojson_path = geometry
-                        for field, value in maneuver_fields.items():
-                            setattr(step_risk, field, value)
-                        step_risk.candidate_osm_way_ids = road_candidates
-                        step_risk.candidate_road_edges = edge_candidates or []
-                        step_risk.road_match_status = "CANDIDATE_ONLY"
-                        if not step_risk.evidence_cameras and step_cameras:
-                            step_risk.evidence_coverage = segment_coverage
-                        segments.append(step_risk)
-                    except Exception as exc:
-                        logger.warning("Error calculating step risk: %s", exc)
-                        segments.append(RouteSegmentRisk(
-                            osm_way_id=None, candidate_osm_way_ids=road_candidates or [],
-                            candidate_road_edges=edge_candidates or [],
-                            road_match_status="CANDIDATE_ONLY" if edge_candidates else "NO_ROAD_EDGE_MATCH",
-                            street_name=step.get("name") or None,
-                            geojson_path=geometry,
-                            length_meters=distance, risk_score=None, risk_level=RiskLevel.UNKNOWN,
-                            **maneuver_fields,
-                            evidence_coverage=segment_coverage, evidence_cameras=[],
-                        ))
-                else:
-                    segments.append(RouteSegmentRisk(
-                        osm_way_id=None, candidate_osm_way_ids=road_candidates or [],
-                        candidate_road_edges=edge_candidates or [],
-                        road_match_status="CANDIDATE_ONLY" if edge_candidates else "NO_ROAD_EDGE_MATCH" if edge_candidates is not None else "ROAD_GRAPH_UNAVAILABLE",
-                        street_name=step.get("name") or None,
-                        geojson_path=geometry,
-                        length_meters=distance, risk_score=None, risk_level=RiskLevel.UNKNOWN,
-                        **maneuver_fields,
-                        evidence_coverage=segment_coverage, evidence_cameras=[],
-                    ))
-
-        critical_count = sum(1 for s in segments if s.risk_level == RiskLevel.CRITICAL)
-        moderate_count = sum(1 for s in segments if s.risk_level == RiskLevel.MODERATE)
-        unknown_count = sum(1 for s in segments if s.risk_level == RiskLevel.UNKNOWN)
-
+                edge_candidates = edges_by_step.get((route_idx, step_idx), [])
+                road_candidates = list(dict.fromkeys(edge["osm_way_id"] for edge in edge_candidates))
+                step_cameras = cameras_by_step.get((route_idx, step_idx), [])
+                coverage = "CORRIDOR_DATA_UNAVAILABLE" if not cameras_available else "SPATIALLY_NEAR_UNVERIFIED_VIEW" if step_cameras else "NO_VERIFIED_CAMERA_GPS"
+                segments.append(RouteSegmentRisk(
+                    osm_way_id=None, osm_edge_index=None,
+                    candidate_osm_way_ids=road_candidates, candidate_road_edges=edge_candidates,
+                    road_match_status="ROAD_GRAPH_UNAVAILABLE" if not edges_available else "CANDIDATE_ONLY" if edge_candidates else "NO_ROAD_EDGE_MATCH",
+                    street_name=step.get("name") or None, geojson_path=geometry,
+                    length_meters=distance, risk_score=None, risk_level=RiskLevel.UNKNOWN,
+                    **maneuver_fields, evidence_coverage=coverage, evidence_cameras=step_cameras,
+                ))
+        if not segments:
+            continue
         duration_seconds = float(route["duration"])
         estimated_time_mins = round(duration_seconds / 60.0, 2)
-        ranking_cost = round(duration_seconds + (critical_count * 3600.0) + (moderate_count * 600.0), 2)
-
-        if critical_count > 0:
-            overall_risk = RiskLevel.CRITICAL
-            route_status = "ROUTE_CRITICAL_RISK_WARNING"
-            ai_explanation = (
-                f"CẢNH BÁO: Tuyến đường này có {critical_count} đoạn nguy cơ ngập nghiêm trọng hoặc kẹt xe cao "
-                f"(dựa trên dữ liệu quan trắc/lịch sử ngập kết hợp thời tiết). Cần hết sức cẩn trọng khi di chuyển."
-            )
-        elif moderate_count > 0:
-            overall_risk = RiskLevel.MODERATE
-            route_status = "ROUTE_MODERATE_RISK_CAUTION"
-            ai_explanation = (
-                f"LƯU Ý: Tuyến đường có {moderate_count} đoạn nguy cơ ngập vừa hoặc mật độ giao thông tăng cao. "
-                f"Thời gian dự kiến: {estimated_time_mins} phút. Đã ưu tiên tránh các đoạn ngập nặng."
-            )
-        elif unknown_count > 0:
-            overall_risk = RiskLevel.UNKNOWN
-            route_status = "ROUTE_FOUND_RISK_UNKNOWN"
-            ai_explanation = (
-                f"Đã tìm thấy tuyến đường ({estimated_time_mins} phút, {round(route['distance'] / 1000, 2)} km). "
-                f"Một số đoạn đường chưa có camera quan sát trực tiếp để xác minh rủi ro."
-            )
-        else:
-            overall_risk = RiskLevel.SAFE
-            route_status = "ROUTE_SAFE_VERIFIED"
-            ai_explanation = "Các đoạn trên tuyến hiện có tín hiệu rủi ro thấp theo dữ liệu sẵn có. Điều kiện thực tế có thể thay đổi."
-
-        coverage = "SPATIALLY_NEAR_UNVERIFIED_VIEW" if camera_count else "NO_VERIFIED_CAMERA_GPS"
-        if camera_count is None:
-            coverage = "CORRIDOR_DATA_UNAVAILABLE"
-
-        responses.append(SafeRouteResponse(
-            route_id=str(uuid.uuid4()),
-            total_distance_km=round(route["distance"] / 1000, 3),
-            estimated_time_mins=estimated_time_mins,
-            ranking_cost=ranking_cost,
-            overall_risk=overall_risk,
-            route_status=route_status,
-            evidence_coverage=coverage,
-            critical_segments_count=critical_count,
-            moderate_segments_count=moderate_count,
-            unknown_segments_count=unknown_count,
-            geojson_path=route["geometry"],
-            segments=segments,
-            ai_explanation=ai_explanation,
-        ))
-
-    # Rerank candidate routes by ranking_cost ascending
-    responses.sort(key=lambda r: (r.ranking_cost if r.ranking_cost is not None else float("inf"), r.estimated_time_mins))
-
-    # If all candidates have critical risk, update top explanation with transparent warning
-    if responses and all(r.critical_segments_count > 0 for r in responses):
-        responses[0].ai_explanation = (
-            "CẢNH BÁO: Mọi lộ trình khả dụng đều đi qua khu vực có nguy cơ ngập lụt nghiêm trọng "
-            "(dựa trên lịch sử ngập đô thị và điều kiện thời tiết/thủy triều hiện tại). Tuyến đường hiển thị là "
-            "phương án ít rủi ro nhất trong các lựa chọn, nhưng khuyến cáo không nên di chuyển qua vùng ngập sâu."
+        explain_started = time.perf_counter()
+        explanation = (
+            f"Đã tìm thấy tuyến đường ({estimated_time_mins} phút, "
+            f"{round(route['distance'] / 1000, 2)} km theo OSRM). "
+            "Chưa xác minh tương ứng giữa OSRM và OSM Way để đánh giá rủi ro từng đoạn."
         )
-
+        explanation_elapsed += time.perf_counter() - explain_started
+        coverage = "CORRIDOR_DATA_UNAVAILABLE" if camera_count is None else "SPATIALLY_NEAR_UNVERIFIED_VIEW" if camera_count else "NO_VERIFIED_CAMERA_GPS"
+        responses.append(SafeRouteResponse(
+            route_id=str(uuid.uuid4()), total_distance_km=round(route["distance"] / 1000, 3),
+            estimated_time_mins=estimated_time_mins, ranking_cost=round(duration_seconds, 2),
+            overall_risk=RiskLevel.UNKNOWN, route_status="ROUTE_FOUND_RISK_UNKNOWN",
+            evidence_coverage=coverage, critical_segments_count=0, moderate_segments_count=0,
+            unknown_segments_count=len(segments), geojson_path=route["geometry"],
+            segments=segments, ai_explanation=explanation,
+        ))
+    if not responses:
+        raise RoutingError("ROUTING_PROVIDER_UNAVAILABLE", 503, "OSRM returned no usable step geometry.")
+    responses.sort(key=lambda route: route.estimated_time_mins)
+    completed_at = time.perf_counter()
+    logger.info(
+        "route_timing request_id=%s osrm_ms=%.1f db_ms=%.1f risk_ms=%.1f explanation_ms=%.1f osrm_cache_hit=%s",
+        request_id or "none", (osrm_done_at - started_at) * 1000,
+        (db_done_at - osrm_done_at) * 1000,
+        max(0.0, completed_at - db_done_at - explanation_elapsed) * 1000,
+        explanation_elapsed * 1000, cache_hit,
+    )
     return responses

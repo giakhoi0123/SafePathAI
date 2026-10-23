@@ -112,6 +112,34 @@ def _validate_onnx_schema(session: Any, entry: Dict[str, Any]) -> bool:
         return False
 
 
+def decode_yolo26_output(output: np.ndarray, conf_threshold: float = 0.25) -> tuple[np.ndarray, np.ndarray, np.ndarray, bool]:
+    """Decode COCO YOLO26 detection heads; return xyxy, confidence, class, needs_nms.
+
+    [1,300,6] is the one-to-one NMS-free head with xyxy/conf/class.
+    [1,84,8400] is one-to-many with cxcywh and 80 class scores, no objectness.
+    Neither layout is compatible with YOLOv5 [1,25200,85].
+    """
+    if output.ndim != 3 or output.shape[0] != 1:
+        raise ValueError(f"Unsupported YOLO26 batch shape: {output.shape}")
+    if output.shape[1:] == (300, 6):
+        rows = output[0]
+        scores = rows[:, 4].astype(np.float32)
+        classes = rows[:, 5].astype(np.int32)
+        valid = np.isfinite(rows).all(axis=1) & (scores >= conf_threshold) & (classes >= 0) & (classes < 80)
+        return rows[valid, :4].astype(np.float32), scores[valid], classes[valid], False
+    if output.shape[1:] == (84, 8400):
+        rows = output[0].T
+        class_scores = rows[:, 4:]
+        classes = np.argmax(class_scores, axis=1).astype(np.int32)
+        scores = class_scores[np.arange(len(rows)), classes].astype(np.float32)
+        valid = np.isfinite(rows).all(axis=1) & (scores >= conf_threshold)
+        xywh = rows[valid, :4].astype(np.float32)
+        boxes = np.column_stack((xywh[:, 0] - xywh[:, 2] / 2, xywh[:, 1] - xywh[:, 3] / 2,
+                                 xywh[:, 0] + xywh[:, 2] / 2, xywh[:, 1] + xywh[:, 3] / 2))
+        return boxes, scores[valid], classes[valid], True
+    raise ValueError(f"Unknown YOLO26 output shape: {output.shape}")
+
+
 @dataclass
 class PreprocessResult:
     """Preprocessed image and ROI metadata."""

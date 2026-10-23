@@ -18,7 +18,7 @@ import httpx
 from PIL import Image
 
 from backend.app.core.config import settings
-from backend.app.schemas.contracts import DataSourceStatus
+from backend.app.schemas.contracts import DataSourceStatus, WeatherTideSignal
 from backend.app.services.scraper import (
     build_camera_image_url,
     get_camera_request_headers,
@@ -287,7 +287,7 @@ class TestWeatherTideIngestion:
         respx.get(url__startswith=open_meteo_url).mock(
             return_value=httpx.Response(
                 200,
-                json={"current": {"time": "2026-10-23T03:00", "precipitation": 12.5, "rain": 12.5, "weather_code": 61}},
+                json={"utc_offset_seconds": 25200, "current": {"time": "2026-10-23T03:00", "precipitation": 12.5, "rain": 12.5, "weather_code": 61}},
             )
         )
 
@@ -295,6 +295,7 @@ class TestWeatherTideIngestion:
         assert rain == 12.5
         assert status == "LIVE"
         assert code == 61
+        assert observed_at.tzinfo is not None
 
     @respx.mock
     @pytest.mark.asyncio
@@ -310,28 +311,21 @@ class TestWeatherTideIngestion:
         assert status == "WEATHER_UNAVAILABLE"
 
     @pytest.mark.asyncio
-    async def test_fetch_tide_signal_normal_and_simulation(self):
+    async def test_fetch_tide_signal_unavailable_without_bulletin(self):
         # Normal tide without bulletin: TIDE_UNAVAILABLE, None
-        normal_signal = await fetch_tide_signal(simulate_high_tide=False)
+        normal_signal = await fetch_tide_signal()
         assert normal_signal.tide_status == "TIDE_UNAVAILABLE"
         assert normal_signal.tide_level_meters is None
-
-        # Simulated high tide: should exceed alert threshold >= 1.50m
-        high_tide_signal = await fetch_tide_signal(simulate_high_tide=True)
-        assert high_tide_signal.tide_level_meters >= HIGH_TIDE_ALERT_THRESHOLD_METERS
-        assert high_tide_signal.is_high_tide_alert is True
-        assert high_tide_signal.tide_status == "SIMULATED"
-
-        # Explicit tide override: 1.65m
-        override_signal = await fetch_tide_signal(tide_override_meters=1.65)
-        assert override_signal.tide_level_meters == 1.65
-        assert override_signal.is_high_tide_alert is True
+        assert normal_signal.timestamp is None
 
     @pytest.mark.asyncio
     async def test_redis_sync_and_retrieve(self):
         """Verifies storing and retrieving WeatherTideSignal to/from real Redis container."""
-        test_signal = await fetch_tide_signal(simulate_high_tide=True)
-        test_signal.rain_mm_per_hour = 35.0
+        test_signal = WeatherTideSignal(
+            rain_mm_per_hour=35.0, rain_status="LIVE", tide_level_meters=1.65,
+            tide_status="LIVE", is_high_tide_alert=True, timestamp=datetime.now(timezone.utc),
+            source_url="https://example.org/test-bulletin",
+        )
 
         # Save to Redis
         saved = await sync_weather_tide_to_redis(test_signal, ttl_seconds=60)

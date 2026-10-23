@@ -204,7 +204,12 @@ def calculate_segment_risk(
         risk_score=final_score,
         risk_level=risk_level,
         historical_flood_prone=is_flood_prone_history,
-        historical_flood_cause="TIDAL_AND_HEAVY_RAIN" if (is_flood_prone_history and tide_alert) else ("HEAVY_RAIN" if is_flood_prone_history else None),
+        historical_flood_cause=(
+            "TIDAL_AND_HEAVY_RAIN" if is_flood_prone_history and tide_alert and weather_risk == "HEAVY_RAIN"
+            else "HIGH_TIDE" if is_flood_prone_history and tide_alert
+            else "HEAVY_RAIN" if is_flood_prone_history and weather_risk == "HEAVY_RAIN"
+            else None
+        ),
         weather_risk=weather_risk,
         evidence_coverage=evidence_coverage,
         evidence_cameras=verified_cams,

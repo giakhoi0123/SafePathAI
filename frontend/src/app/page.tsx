@@ -27,21 +27,16 @@ import { RouteResults } from "../components/RouteResults";
 import { PlaceSearchCombobox } from "../components/PlaceSearchCombobox";
 import {
   Navigation,
-  MapPin,
   ArrowRightLeft,
   Search,
-  ShieldCheck,
   ShieldAlert,
   AlertTriangle,
   Radio,
-  Clock,
   Layers,
   Info,
   CheckCircle,
   CloudRain,
   Waves,
-  Crosshair,
-  RotateCcw,
 } from "lucide-react";
 
 const HCMC_PRESETS: { name: string; coords: Coordinates }[] = [
@@ -53,53 +48,9 @@ const HCMC_PRESETS: { name: string; coords: Coordinates }[] = [
   { name: "Nhà thờ Đức Bà (Quận 1)", coords: { lat: 10.7798, lng: 106.6990 } },
 ];
 
-const coverageLabel = (status?: string) => ({
-  NO_VERIFIED_OBSERVATIONS: "Có vị trí camera, chưa có quan trắc xác minh",
-  NO_CAMERAS_IN_CORRIDOR: "Không có camera trong hành lang",
-  NO_VERIFIED_CAMERA_GPS: "Chưa có camera với GPS xác minh",
-  SPATIALLY_NEAR_UNVERIFIED_VIEW: "Camera gần tuyến; chưa xác minh hướng nhìn",
-  CORRIDOR_DATA_UNAVAILABLE: "Dữ liệu hành lang chưa khả dụng",
-  UNAVAILABLE: "Chưa có dữ liệu",
-}[status || "UNAVAILABLE"] || "Chưa có dữ liệu");
-
-const renderRiskBadge = (risk: RiskLevel) => {
-  switch (risk) {
-    case RiskLevel.CRITICAL:
-      return (
-        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-rose-500/20 text-rose-400 border border-rose-500/40 animate-pulse">
-          <ShieldAlert className="w-3.5 h-3.5" />
-          <span>NGUY KỊCH (CRITICAL)</span>
-        </span>
-      );
-    case RiskLevel.MODERATE:
-      return (
-        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40">
-          <AlertTriangle className="w-3.5 h-3.5" />
-          <span>RỦI RO VỪA (MODERATE)</span>
-        </span>
-      );
-    case RiskLevel.SAFE:
-      return (
-        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
-          <CheckCircle className="w-3.5 h-3.5" />
-          <span>AN TOÀN (SAFE)</span>
-        </span>
-      );
-    case RiskLevel.INSUFFICIENT_EVIDENCE:
-    case RiskLevel.UNKNOWN:
-    default:
-      return (
-        <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 border border-slate-700">
-          <Info className="w-3.5 h-3.5 text-blue-400" />
-          <span>CHƯA XÁC MINH (UNKNOWN)</span>
-        </span>
-      );
-  }
-};
-
 export default function SafePathDashboard() {
   const [cameras, setCameras] = useState<CameraEvidence[]>([]);
-  const [uxState, setUxState] = useState<NavigationUXState>("IDLE");
+  const [, setUxState] = useState<NavigationUXState>("IDLE");
   const [origin, setOrigin] = useState<Coordinates | null>(HCMC_PRESETS[0].coords);
   const [originText, setOriginText] = useState<string>(HCMC_PRESETS[0].name);
   const [destination, setDestination] = useState<Coordinates | null>(HCMC_PRESETS[2].coords);
@@ -123,7 +74,7 @@ export default function SafePathDashboard() {
   const shouldScrollResultsRef = useRef(false);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [latestAlertMessage, setLatestAlertMessage] = useState<WebSocketAlertMessage | null>(null);
-  const [backendHealth, setBackendHealth] = useState<string>("checking");
+  const [, setBackendHealth] = useState<string>("checking");
   const [sheetExpanded, setSheetExpanded] = useState(false);
   const [weatherTide, setWeatherTide] = useState<WeatherTideSignal | null>(null);
 
@@ -187,7 +138,9 @@ export default function SafePathDashboard() {
         const routeData = await searchSafeRoute(orig, dest);
         if (requestId !== requestSequenceRef.current) return;
         const routes = [routeData, ...(routeData.alternative_routes || [])];
-        const fastest = routes.reduce((best, route) => route.estimated_time_mins < best.estimated_time_mins ? route : best);
+        const fastest = routes.reduce((best, route) =>
+          route.estimated_time_mins < best.estimated_time_mins ? route : best
+        );
         shouldScrollResultsRef.current = true;
         setRecommendedRoute(fastest);
         setAlternativeRoutes(routes.filter((route) => route.route_id !== fastest.route_id));
@@ -200,7 +153,11 @@ export default function SafePathDashboard() {
             setRouteError("Dịch vụ tìm đường đang gián đoạn. Vui lòng thử lại.");
             setUxState("PROVIDER_DOWN");
           } else {
-            setRouteError(errMsg.includes("NO_ROUTE_FOUND") ? "Không tìm được tuyến lái xe hợp lệ giữa hai điểm." : errMsg);
+            setRouteError(
+              errMsg.includes("NO_ROUTE_FOUND")
+                ? "Không tìm được tuyến lái xe hợp lệ giữa hai điểm."
+                : errMsg
+            );
             setUxState("NO_ROUTE");
           }
         }
@@ -214,11 +171,11 @@ export default function SafePathDashboard() {
   useEffect(() => {
     if (!recommendedRoute || !shouldScrollResultsRef.current) return;
     shouldScrollResultsRef.current = false;
-    routeResultsRef.current?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+    routeResultsRef.current?.scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+    });
   }, [recommendedRoute]);
-
-  // NOTE: Zero-Mock strictly avoids auto-routing on initial mount.
-  // User must explicitly initiate routing or choose an endpoint.
 
   const invalidateRoute = useCallback(() => {
     requestSequenceRef.current++;
@@ -313,7 +270,6 @@ export default function SafePathDashboard() {
         }
         if (origin) setUxState("READY_TO_ROUTE");
       } else {
-        // Default intuitive selection when mode is NONE
         if (!origin) {
           setOrigin(coords);
           setOriginText(`Vị trí đã chọn [${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}]`);
@@ -358,113 +314,148 @@ export default function SafePathDashboard() {
     }
   };
 
-  const handleSelectRoute = useCallback((route: SafeRouteResponse) => {
-    if (!recommendedRoute || recommendedRoute.route_id === route.route_id) return;
-    setAlternativeRoutes([recommendedRoute, ...alternativeRoutes.filter((item) => item.route_id !== route.route_id)]);
-    setRecommendedRoute(route);
-    setSelectedStepIndex(null);
-  }, [recommendedRoute, alternativeRoutes]);
+  const handleSelectRoute = useCallback(
+    (route: SafeRouteResponse) => {
+      if (!recommendedRoute || recommendedRoute.route_id === route.route_id) return;
+      setAlternativeRoutes([
+        recommendedRoute,
+        ...alternativeRoutes.filter((item) => item.route_id !== route.route_id),
+      ]);
+      setRecommendedRoute(route);
+      setSelectedStepIndex(null);
+    },
+    [recommendedRoute, alternativeRoutes]
+  );
 
-  // Count verified cameras with active live evidence (Zero-Mock strictly enforces real status)
   const verifiedActiveCamerasCount = cameras.filter(
-    (c) => c.source_status === "LIVE" && c.spatial_match_status === "OBSERVED_SEGMENT_VERIFIED" && c.risk_level !== RiskLevel.UNKNOWN
+    (c) =>
+      c.source_status === "LIVE" &&
+      c.spatial_match_status === "OBSERVED_SEGMENT_VERIFIED" &&
+      c.risk_level !== RiskLevel.UNKNOWN
   ).length;
-  const selectedRouteExplanation = recommendedRoute ? (() => {
-    const routes = [recommendedRoute, ...alternativeRoutes];
-    const fastest = routes.reduce((best, route) => route.estimated_time_mins < best.estimated_time_mins ? route : best);
-    const name = recommendedRoute.route_id === fastest.route_id ? "Đường đề xuất theo thời gian" : "Đường đang chọn";
-    const metrics = `${recommendedRoute.estimated_time_mins.toFixed(1)} phút, ${recommendedRoute.total_distance_km.toFixed(1)} km`;
-    const allUnknown = !recommendedRoute.segments.length || recommendedRoute.segments.every((segment) =>
-      segment.risk_level === RiskLevel.UNKNOWN || segment.risk_level === RiskLevel.INSUFFICIENT_EVIDENCE
-    );
-    return allUnknown
-      ? `${name}: ${metrics}. Chưa đủ dữ liệu để xác nhận mức rủi ro trên toàn tuyến.`
-      : `${name}: ${metrics}. ${recommendedRoute.ai_explanation}`;
-  })() : "";
+
+  const selectedRouteExplanation = recommendedRoute
+    ? (() => {
+        const routes = [recommendedRoute, ...alternativeRoutes];
+        const fastest = routes.reduce((best, route) =>
+          route.estimated_time_mins < best.estimated_time_mins ? route : best
+        );
+        const name =
+          recommendedRoute.route_id === fastest.route_id ? "Đường đề xuất theo thời gian" : "Đường đang chọn";
+        const metrics = `${recommendedRoute.estimated_time_mins.toFixed(1)} phút, ${recommendedRoute.total_distance_km.toFixed(1)} km`;
+        const allUnknown =
+          !recommendedRoute.segments.length ||
+          recommendedRoute.segments.every(
+            (segment) =>
+              segment.risk_level === RiskLevel.UNKNOWN ||
+              segment.risk_level === RiskLevel.INSUFFICIENT_EVIDENCE
+          );
+        return allUnknown
+          ? `${name}: ${metrics}. Chưa đủ dữ liệu để xác nhận mức rủi ro trên toàn tuyến.`
+          : `${name}: ${metrics}. ${recommendedRoute.ai_explanation}`;
+      })()
+    : "";
 
   return (
-    <div className="flex flex-col h-[100dvh] w-screen overflow-hidden bg-slate-950 text-slate-100">
-      {/* Top Navigation Bar */}
-      <header className="h-14 border-b border-slate-800 bg-slate-900/90 backdrop-blur-md px-5 flex items-center justify-between shrink-0 z-30">
+    <div className="flex flex-col h-[100dvh] w-screen overflow-hidden bg-pearl-100 text-ink-900 relative">
+      {/* Background ambient glowing aurora orbs */}
+      <div className="absolute top-[-10%] left-[-5%] w-[45vw] h-[45vw] rounded-full bg-gradient-to-br from-indigo-200/40 via-ice-200/30 to-transparent blur-3xl pointer-events-none" />
+      <div className="absolute bottom-[-10%] right-[-5%] w-[40vw] h-[40vw] rounded-full bg-gradient-to-tl from-lavender-200/40 via-soft-cyan/30 to-transparent blur-3xl pointer-events-none" />
+
+      {/* Top Floating Glass Navigation Bar */}
+      <header className="h-14 glass-panel border-b border-white/80 px-5 flex items-center justify-between shrink-0 z-30 shadow-glass-sm">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-gradient-to-tr from-blue-600 to-indigo-500 rounded-xl shadow-lg shadow-blue-500/20 text-white">
+          <div className="p-2 bg-gradient-to-tr from-indigo-600 via-blue-600 to-sky-500 rounded-2xl shadow-md shadow-indigo-500/25 text-white">
             <Navigation className="w-5 h-5" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-base font-black tracking-tight text-white">
-                SafePath<span className="text-blue-400">AI</span>
+              <h1 className="text-base font-black tracking-tight text-ink-950">
+                SafePath<span className="aurora-gradient-text font-black">AI</span>
               </h1>
-              <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+              <span className="text-[10px] font-bold tracking-wider px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/70 shadow-sm">
                 TP. Hồ Chí Minh
               </span>
             </div>
-            <p className="hidden md:block text-[10px] text-slate-400 leading-none mt-0.5">
-              Lộ trình theo đường thực · Cảnh báo khi có dữ liệu rủi ro
+            <p className="hidden md:block text-[11px] text-ink-500 leading-none mt-0.5 font-medium">
+              Lộ trình theo đường thực · Cảnh báo rủi ro tức thời
             </p>
           </div>
         </div>
 
         {/* Status Indicators */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
           {/* Verified Cameras Counter Badge */}
-          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 bg-slate-800/80 border border-slate-700/60 rounded-lg text-xs font-medium text-slate-300">
-            <Layers className="w-3.5 h-3.5 text-blue-400" />
+          <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 glass-pill rounded-full text-xs font-semibold text-ink-700 border border-white/90">
+            <Layers className="w-3.5 h-3.5 text-indigo-600" />
             <span>{verifiedActiveCamerasCount} camera đủ xác minh</span>
-            <span className="text-[10px] text-slate-500 font-mono">({cameras.length} đăng ký)</span>
+            <span className="text-[10px] text-ink-400 font-mono">({cameras.length} đăng ký)</span>
           </div>
 
           {/* WebSocket Live Indicator */}
           <div
-            className={`hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border ${
+            className={`hidden md:flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold border ${
               wsConnected
-                ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
-                : "bg-amber-500/10 border-amber-500/30 text-amber-400"
+                ? "bg-emerald-50/90 border-emerald-200 text-emerald-700"
+                : "bg-amber-50/90 border-amber-200 text-amber-700"
             }`}
           >
             <Radio className={`w-3 h-3 ${wsConnected ? "animate-pulse" : ""}`} />
-            <span>{wsConnected ? "WebSocket Trực Tiếp" : "Đang Kết Nối Lại..."}</span>
+            <span>{wsConnected ? "Trực tiếp" : "Đang kết nối lại..."}</span>
           </div>
         </div>
       </header>
 
       {/* Main App Workspace */}
       <div className="flex flex-1 min-h-0 overflow-hidden relative">
-        {/* Left Control Sidebar */}
-        <aside className={`absolute bottom-0 left-0 right-0 z-20 flex flex-col overflow-y-auto rounded-t-2xl border-t border-slate-700 bg-slate-900/95 shadow-2xl backdrop-blur-md transition-[height] duration-200 md:static md:h-full md:w-[420px] md:shrink-0 md:rounded-none md:border-r md:border-t-0 ${sheetExpanded ? "h-[min(55dvh,580px)]" : "h-[min(37dvh,280px)]"}`}>
-          <button type="button" className="sticky top-0 z-30 flex min-h-10 items-center justify-center bg-slate-900 text-xs font-semibold text-slate-300 md:hidden" aria-label={sheetExpanded ? "Thu gọn bảng tuyến đường" : "Mở bảng tuyến đường"} aria-expanded={sheetExpanded} onClick={() => setSheetExpanded((v) => !v)}><span className="h-1.5 w-10 rounded-full bg-slate-500" /></button>
+        {/* Left Control Sidebar / Bottom Sheet */}
+        <aside
+          className={`absolute bottom-0 left-0 right-0 z-20 flex flex-col overflow-y-auto rounded-t-3xl border-t border-white/90 glass-panel-elevated shadow-glass-elevated transition-[height] duration-200 md:static md:h-full md:w-[420px] md:shrink-0 md:rounded-none md:border-r md:border-t-0 ${
+            sheetExpanded ? "h-[min(55dvh,580px)]" : "h-[min(37dvh,280px)]"
+          }`}
+        >
+          <button
+            type="button"
+            className="sticky top-0 z-30 flex min-h-10 items-center justify-center bg-white/60 backdrop-blur-md text-xs font-semibold text-ink-600 md:hidden"
+            aria-label={sheetExpanded ? "Thu gọn bảng tuyến đường" : "Mở bảng tuyến đường"}
+            aria-expanded={sheetExpanded}
+            onClick={() => setSheetExpanded((v) => !v)}
+          >
+            <span className="h-1.5 w-12 rounded-full bg-slate-300" />
+          </button>
+
           <div className="p-4 space-y-4">
             {/* Origin & Destination Route Search Form */}
-            <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 space-y-3.5 shadow-inner">
-              <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+            <div className="glass-panel rounded-3xl p-4 space-y-3.5 border border-white/90 shadow-glass">
+              <div className="flex items-center justify-between border-b border-slate-200/70 pb-2.5">
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-                    Tuyến đường
+                  <span className="text-xs font-bold text-ink-800 uppercase tracking-wider">
+                    Kế hoạch chuyến đi
                   </span>
-
                 </div>
                 <button
                   type="button"
                   onClick={handleSwap}
-                  className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition"
+                  className="p-1.5 hover:bg-slate-100 rounded-full text-ink-500 hover:text-ink-900 transition cursor-pointer"
                   title="Đảo chiều điểm đi và điểm đến"
                   aria-label="Đảo chiều lộ trình"
                 >
-                  <ArrowRightLeft className="w-4 h-4" />
+                  <ArrowRightLeft className="w-4 h-4 text-indigo-600" />
                 </button>
               </div>
 
               {/* Geolocation Error Alert if any */}
               {locationError && (
-                <div role="alert" className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-2.5 text-xs text-amber-300 flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  <div className="flex-1 leading-relaxed">
-                    {locationError}
-                  </div>
+                <div
+                  role="alert"
+                  className="rounded-2xl border border-amber-300 bg-amber-50/80 p-3 text-xs text-amber-900 flex items-start gap-2 shadow-sm"
+                >
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="flex-1 leading-relaxed">{locationError}</div>
                   <button
                     type="button"
                     onClick={() => setLocationError(null)}
-                    className="text-amber-400 hover:text-white text-xs"
+                    className="text-amber-700 hover:text-amber-950 font-bold text-xs"
                   >
                     Đóng
                   </button>
@@ -473,7 +464,7 @@ export default function SafePathDashboard() {
 
               {/* Origin Selection Combobox */}
               <PlaceSearchCombobox
-                label="Từ đâu?"
+                label="Bạn đi từ đâu?"
                 placeholder="Nhập địa chỉ, tên đường hoặc tọa độ..."
                 color="emerald"
                 value={originText}
@@ -496,14 +487,16 @@ export default function SafePathDashboard() {
                 onLocateMe={handleGetCurrentLocation}
                 isLocating={isLocating}
                 isPickingOnMap={mapSelectionMode === "ORIGIN"}
-                onTogglePickOnMap={() => setMapSelectionMode((m) => (m === "ORIGIN" ? "NONE" : "ORIGIN"))}
+                onTogglePickOnMap={() =>
+                  setMapSelectionMode((m) => (m === "ORIGIN" ? "NONE" : "ORIGIN"))
+                }
                 ariaLabel="Từ đâu? Điểm xuất phát"
                 testId="origin-combobox"
               />
 
               {/* Destination Selection Combobox */}
               <PlaceSearchCombobox
-                label="Đến đâu?"
+                label="Bạn muốn đến đâu?"
                 placeholder="Nhập địa chỉ, tên đường hoặc tọa độ..."
                 color="rose"
                 value={destinationText}
@@ -524,14 +517,16 @@ export default function SafePathDashboard() {
                   }
                 }}
                 isPickingOnMap={mapSelectionMode === "DESTINATION"}
-                onTogglePickOnMap={() => setMapSelectionMode((m) => (m === "DESTINATION" ? "NONE" : "DESTINATION"))}
+                onTogglePickOnMap={() =>
+                  setMapSelectionMode((m) => (m === "DESTINATION" ? "NONE" : "DESTINATION"))
+                }
                 ariaLabel="Đến đâu? Điểm đến"
                 testId="destination-combobox"
               />
 
               {/* Quick Presets Chips */}
-              <div className="pt-2 border-t border-slate-800/80">
-                <span className="text-[10px] text-slate-500 block mb-1.5 font-medium">
+              <div className="pt-2 border-t border-slate-200/70">
+                <span className="text-[11px] text-ink-500 block mb-2 font-medium">
                   Địa điểm gợi ý nhanh tại TP.HCM:
                 </span>
                 <div className="flex flex-wrap gap-1.5">
@@ -550,7 +545,7 @@ export default function SafePathDashboard() {
                           setUxState("READY_TO_ROUTE");
                         }
                       }}
-                      className="px-2 py-0.5 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[10px] text-slate-300 hover:text-white transition"
+                      className="px-2.5 py-1 rounded-full bg-white/80 hover:bg-white border border-slate-200/80 text-[11px] font-medium text-ink-700 hover:text-indigo-600 shadow-glass-sm transition cursor-pointer"
                     >
                       {p.name.split(" (")[0]}
                     </button>
@@ -563,7 +558,7 @@ export default function SafePathDashboard() {
                 type="button"
                 onClick={() => handleSearchRoute()}
                 disabled={isLoadingRoute || !origin || !destination}
-                className="w-full mt-2 py-2.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 transition"
+                className="aurora-btn-primary w-full mt-2 py-3 px-4 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-xs rounded-2xl flex items-center justify-center gap-2 cursor-pointer"
               >
                 {isLoadingRoute ? (
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -578,78 +573,120 @@ export default function SafePathDashboard() {
               </button>
 
               {routeError && (
-                <div role="alert" className="rounded-lg border border-rose-500/50 bg-rose-950/40 p-3 text-xs text-rose-200">
-                  <p>Không có tuyến để hiển thị: {routeError}</p>
-                  <button type="button" className="mt-2 underline" onClick={() => handleSearchRoute()}>Thử lại</button>
+                <div
+                  role="alert"
+                  className="rounded-2xl border border-rose-300 bg-rose-50/90 p-3 text-xs text-rose-800 shadow-sm"
+                >
+                  <p className="font-medium">Không có tuyến để hiển thị: {routeError}</p>
+                  <button
+                    type="button"
+                    className="mt-2 underline font-semibold text-rose-900 cursor-pointer"
+                    onClick={() => handleSearchRoute()}
+                  >
+                    Thử lại
+                  </button>
                 </div>
               )}
             </div>
 
-            {recommendedRoute ? <div ref={routeResultsRef} className="space-y-3 scroll-mt-3">
-              <NavigationGuidance route={recommendedRoute} explanation={selectedRouteExplanation} latestAlert={latestAlertMessage} onPositionUpdate={setCurrentLocation} />
-              <RouteResults selected={recommendedRoute} alternatives={alternativeRoutes} selectedStepIndex={selectedStepIndex} onSelect={handleSelectRoute} onSelectStep={setSelectedStepIndex} onSelectCamera={setSelectedCamera} />
-            </div> : <NavigationGuidance route={null} explanation="" latestAlert={latestAlertMessage} onPositionUpdate={setCurrentLocation} />}
+            {recommendedRoute ? (
+              <div ref={routeResultsRef} className="space-y-3.5 scroll-mt-3">
+                <NavigationGuidance
+                  route={recommendedRoute}
+                  explanation={selectedRouteExplanation}
+                  latestAlert={latestAlertMessage}
+                  onPositionUpdate={setCurrentLocation}
+                />
+                <RouteResults
+                  selected={recommendedRoute}
+                  alternatives={alternativeRoutes}
+                  selectedStepIndex={selectedStepIndex}
+                  onSelect={handleSelectRoute}
+                  onSelectStep={setSelectedStepIndex}
+                  onSelectCamera={setSelectedCamera}
+                />
+              </div>
+            ) : (
+              <NavigationGuidance
+                route={null}
+                explanation=""
+                latestAlert={latestAlertMessage}
+                onPositionUpdate={setCurrentLocation}
+              />
+            )}
+
             {/* Environmental Conditions Widget (Weather & Tide) */}
-            <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-3.5 space-y-2.5 shadow-inner">
-              <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                  <CloudRain className="w-3.5 h-3.5 text-blue-400" />
-                  Môi trường & Thủy văn Thực địa
+            <div className="glass-panel rounded-3xl p-3.5 space-y-2.5 border border-white/90 shadow-glass">
+              <div className="flex items-center justify-between border-b border-slate-200/70 pb-2">
+                <span className="text-[11px] font-bold text-ink-800 uppercase tracking-wider flex items-center gap-1.5">
+                  <CloudRain className="w-3.5 h-3.5 text-indigo-600" />
+                  Thời tiết & Thủy văn Thực địa
                 </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {weatherTide?.timestamp ? new Date(weatherTide.timestamp).toLocaleTimeString("vi-VN") : "Đang kết nối"}
+                <span className="text-[10px] text-ink-400 font-mono">
+                  {weatherTide?.timestamp
+                    ? new Date(weatherTide.timestamp).toLocaleTimeString("vi-VN")
+                    : "Đang kết nối"}
                 </span>
               </div>
 
               <div className="grid grid-cols-2 gap-2 text-xs">
                 {/* Weather Rainfall */}
-                <div className="bg-slate-900/80 border border-slate-800/80 rounded-xl p-2.5 space-y-1">
-                  <span className="text-[10px] text-slate-400 block">Lượng mưa (Open-Meteo)</span>
-                  <div className="font-bold text-sm text-white">
-                    {weatherTide?.rain_mm_per_hour !== null && weatherTide?.rain_mm_per_hour !== undefined
+                <div className="bg-white/80 border border-slate-200/80 rounded-2xl p-2.5 space-y-1 shadow-glass-sm">
+                  <span className="text-[10px] text-ink-500 block font-medium">Lượng mưa (Open-Meteo)</span>
+                  <div className="font-black text-sm text-ink-950">
+                    {weatherTide?.rain_mm_per_hour !== null &&
+                    weatherTide?.rain_mm_per_hour !== undefined
                       ? `${weatherTide.rain_mm_per_hour.toFixed(1)} mm/h`
                       : "Chưa có dữ liệu"}
                   </div>
-                  <span className="text-[10px] text-slate-500 block">
+                  <span className="text-[10px] text-ink-400 block font-medium">
                     Trạng thái: <strong>{weatherTide?.rain_status || "UNAVAILABLE"}</strong>
                   </span>
                 </div>
 
                 {/* Tide Water Level */}
-                <div className="bg-slate-900/80 border border-slate-800/80 rounded-xl p-2.5 space-y-1">
-                  <span className="text-[10px] text-slate-400 block flex items-center gap-1">
-                    <Waves className="w-3 h-3 text-cyan-400" />
-                    Thủy triều (Trạm Phú An)
+                <div className="bg-white/80 border border-slate-200/80 rounded-2xl p-2.5 space-y-1 shadow-glass-sm">
+                  <span className="text-[10px] text-ink-500 block font-medium flex items-center gap-1">
+                    <Waves className="w-3 h-3 text-cyan-600" />
+                    Thủy triều (Phú An)
                   </span>
-                  <div className="font-bold text-sm text-white">
-                    {weatherTide?.tide_level_meters !== null && weatherTide?.tide_level_meters !== undefined
+                  <div className="font-black text-sm text-ink-950">
+                    {weatherTide?.tide_level_meters !== null &&
+                    weatherTide?.tide_level_meters !== undefined
                       ? `${weatherTide.tide_level_meters.toFixed(2)} m`
                       : "Chưa có bản tin"}
                   </div>
-                  <span className="text-[10px] text-slate-500 block">
-                    Hệ mốc: <strong>Hòn Dấu (VN-2000)</strong>
+                  <span className="text-[10px] text-ink-400 block font-medium">
+                    Hệ mốc: <strong>Hòn Dấu</strong>
                   </span>
                 </div>
               </div>
 
               {weatherTide?.is_high_tide_alert && (
-                <div className="p-2 bg-rose-950/60 border border-rose-500/40 rounded-xl text-[11px] text-rose-300 flex items-center gap-2">
-                  <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
-                  <span>Cảnh báo triều cường: Mực nước vượt ngưỡng Báo động II (&ge; 1.50m)</span>
+                <div className="p-2.5 bg-rose-50 border border-rose-300 rounded-2xl text-[11px] text-rose-800 flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span className="font-medium">
+                    Cảnh báo triều cường: Mực nước vượt ngưỡng Báo động II (&ge; 1.50m)
+                  </span>
                 </div>
               )}
             </div>
-
           </div>
         </aside>
 
         {/* Right Main Map Container */}
-        <main className={`flex-1 h-full min-w-0 relative md:pb-0 ${sheetExpanded ? "pb-[min(55dvh,580px)]" : "pb-[min(37dvh,280px)]"}`}>
+        <main
+          className={`flex-1 h-full min-w-0 relative md:pb-0 ${
+            sheetExpanded ? "pb-[min(55dvh,580px)]" : "pb-[min(37dvh,280px)]"
+          }`}
+        >
           <MapContainer
             cameras={cameras}
             recommendedRoute={recommendedRoute}
             alternativeRoutes={alternativeRoutes}
-            highlightedSegment={selectedStepIndex === null ? null : recommendedRoute?.segments[selectedStepIndex]}
+            highlightedSegment={
+              selectedStepIndex === null ? null : recommendedRoute?.segments[selectedStepIndex]
+            }
             origin={origin}
             destination={destination}
             currentLocation={currentLocation}
@@ -658,8 +695,6 @@ export default function SafePathDashboard() {
             onMapClickCoordinates={handleMapClick}
             onSelectCamera={setSelectedCamera}
             onSelectRoute={handleSelectRoute}
-            onRequestCurrentLocation={handleGetCurrentLocation}
-            isRequestingLocation={isLocating}
           />
         </main>
       </div>

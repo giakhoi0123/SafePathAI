@@ -1,7 +1,6 @@
 /**
  * SafePathAI High-Concurrency Load Testing Script using Grafana k6.
- * Simulates 30 concurrent Virtual Users (VUs) querying the dynamic safe routing engine
- * for 30 seconds to prove sub-300ms p(95) latency and 0% error rate.
+ * Live OSRM/PostGIS route benchmark. Results are observations, not guaranteed targets.
  */
 
 import http from 'k6/http';
@@ -11,14 +10,15 @@ import { Trend, Rate, Counter } from 'k6/metrics';
 const routeSearchDuration = new Trend('route_search_duration_ms', true);
 const errorRate = new Rate('route_search_error_rate');
 const successfulSearches = new Counter('route_search_success_count');
+const failedSearches = new Counter('route_search_failure_count');
+const VUS = Number(__ENV.K6_VUS || 30);
 
 export const options = {
-  vus: 30,
-  duration: '30s',
+  vus: VUS,
+  duration: __ENV.K6_DURATION || '30s',
   thresholds: {
-    // Zero-Mock empirical measurement: fail test only if error rate > 5% under 30 VUs load
-    http_req_failed: ['rate<0.05'],
-    'route_search_duration_ms': ['p(95)<3000'],
+    route_search_error_rate: ['rate<0.01'],
+    ...(VUS <= 30 ? { route_search_duration_ms: [`p(95)<${VUS <= 10 ? 1500 : 3000}`] } : {}),
   },
 };
 
@@ -45,8 +45,8 @@ const HCM_COORDINATE_PAIRS = [
 ];
 
 export default function () {
-  // Select a random origin-destination pair
-  const pair = HCM_COORDINATE_PAIRS[Math.floor(Math.random() * HCM_COORDINATE_PAIRS.length)];
+  // Repeatable mix across VUs and iterations for before/after comparison.
+  const pair = HCM_COORDINATE_PAIRS[(__VU + __ITER - 1) % HCM_COORDINATE_PAIRS.length];
 
   const payload = JSON.stringify({
     origin: pair.origin,
@@ -58,18 +58,21 @@ export default function () {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     },
-    timeout: '5s',
+    timeout: __ENV.K6_TIMEOUT || '5s',
   };
 
   const response = http.post(`${BASE_URL}/api/v1/routes/search`, payload, params);
   routeSearchDuration.add(response.timings.duration);
 
   // Validate response contract
+  let body = null;
+  if (response.status === 200 && response.body) {
+    try { body = JSON.parse(response.body); } catch (_) { body = null; }
+  }
   const isOk = check(response, {
-    'status is 200': (r) => r.status === 200,
-    'has route_id': (r) => r.json('route_id') !== undefined,
-    'total_distance_km > 0': (r) => r.json('total_distance_km') > 0,
-    'ai_explanation populated': (r) => (r.json('ai_explanation') || '').length > 0,
+    'valid live route response': () => response.status === 200 && Boolean(body) &&
+      typeof body.route_id === 'string' && body.total_distance_km > 0 &&
+      typeof body.ai_explanation === 'string' && body.ai_explanation.length > 0,
   });
 
   if (isOk) {
@@ -77,6 +80,7 @@ export default function () {
     errorRate.add(0);
   } else {
     errorRate.add(1);
+    failedSearches.add(1, { status: String(response.status || 0), reason: response.error_code ? String(response.error_code) : 'invalid_response' });
   }
 
   // Small pacing delay between requests (50ms - 150ms)

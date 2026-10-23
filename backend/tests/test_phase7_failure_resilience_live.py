@@ -136,7 +136,7 @@ class TestPhase7FailureResilienceLive:
 
     async def test_tide_unavailable_by_default_never_defaults_to_safe_or_simulated(self):
         """Tide signal defaults to TIDE_UNAVAILABLE unless an official signed bulletin is ingested."""
-        signal = await fetch_tide_signal(simulate_high_tide=False)
+        signal = await fetch_tide_signal()
         assert signal.tide_level_meters is None
         assert signal.tide_status == "TIDE_UNAVAILABLE"
         assert signal.is_high_tide_alert is None

@@ -8,7 +8,7 @@ Fetches real-time hydrometeorological signals for Ho Chi Minh City:
 - Caches signals in Redis with grid-based coordinate rounding and TTL matching source cadences.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 from typing import Optional
@@ -76,7 +76,7 @@ async def fetch_hcm_weather(
                 observed_at = None
                 if data.get("rain_observed_at"):
                     observed_at = datetime.fromisoformat(data["rain_observed_at"])
-                if observed_at is not None:
+                if observed_at is not None and observed_at.tzinfo is not None:
                     return (data.get("rain_mm_per_hour"), data.get("rain_status", "LIVE"), observed_at, data.get("weather_code"))
         except Exception as exc:
             logger.debug("Redis weather cache read failed: %s", exc)
@@ -108,6 +108,12 @@ async def fetch_hcm_weather(
             if time_str:
                 try:
                     observed_at = datetime.fromisoformat(time_str)
+                    if observed_at.tzinfo is None:
+                        offset = data.get("utc_offset_seconds")
+                        if isinstance(offset, int) and -43200 <= offset <= 50400:
+                            observed_at = observed_at.replace(tzinfo=timezone(timedelta(seconds=offset)))
+                        else:
+                            observed_at = None
                 except ValueError:
                     pass
             if observed_at is None or rain_mm is None:

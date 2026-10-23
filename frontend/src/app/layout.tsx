@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "SafePathAI - Tuyến đường OpenStreetMap TP.HCM",
+  title: "SafePathAI - Tuyến đường thông minh TP.HCM",
   description:
-    "Tuyến đường ô tô từ OSRM và OpenStreetMap tại TP.HCM; trạng thái rủi ro minh bạch khi chưa có quan trắc xác minh.",
+    "Lộ trình lái xe an toàn thời gian thực dựa trên dữ liệu giao thông, camera và thủy văn tại TP.HCM.",
 };
 
 export default function RootLayout({
@@ -13,11 +13,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="vi" className="dark">
-      <body className="min-h-screen bg-slate-950 text-slate-100 antialiased selection:bg-blue-600 selection:text-white">
+    <html lang="vi">
+      <body className="min-h-screen bg-pearl-100 text-ink-900 antialiased selection:bg-indigo-600 selection:text-white">
         {children}
       </body>
     </html>
   );
 }
-

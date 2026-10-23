@@ -19,6 +19,7 @@ from backend.app.db.session import AsyncSessionLocal, get_redis_client
 from backend.app.schemas.contracts import (
     CameraEvidence,
     DataSourceStatus,
+    EvidenceEligibility,
     RiskLevel,
     RouteSegmentRisk,
     SafeRouteResponse,
@@ -61,6 +62,7 @@ class TestSegmentRiskEngine:
             risk_level=RiskLevel.CRITICAL,
             source_status=DataSourceStatus.LIVE,
             spatial_match_status="OBSERVED_SEGMENT_VERIFIED",
+            evidence_eligibility=EvidenceEligibility.ROUTING_ELIGIBLE,
             line_of_sight_verified=True,
             observed_osm_way_id=1001,
             updated_at=datetime.now(timezone.utc),
@@ -96,6 +98,7 @@ class TestSegmentRiskEngine:
             risk_level=RiskLevel.SAFE,
             source_status=DataSourceStatus.LIVE,
             spatial_match_status="OBSERVED_SEGMENT_VERIFIED",
+            evidence_eligibility=EvidenceEligibility.ROUTING_ELIGIBLE,
             line_of_sight_verified=True,
             observed_osm_way_id=4004,
             updated_at=datetime.now(timezone.utc),
@@ -106,10 +109,10 @@ class TestSegmentRiskEngine:
             weather_tide=weather_tide,
         )
         assert seg_risk_safe.risk_level == RiskLevel.UNKNOWN
-        assert seg_risk_safe.risk_score < 30.0
+        assert seg_risk_safe.risk_score is None
 
     def test_segment_risk_without_cameras(self):
-        """When no camera is present, historically flood-prone segments scale with weather and tide."""
+        """Regional weather and historical flood points cannot measure current road water."""
         severe_weather = WeatherTideSignal(
             rain_mm_per_hour=45.0,
             tide_level_meters=1.70,
@@ -121,8 +124,8 @@ class TestSegmentRiskEngine:
             camera_evidences=[],
             weather_tide=severe_weather,
         )
-        assert seg_risk_severe.risk_level == RiskLevel.CRITICAL
-        assert seg_risk_severe.risk_score >= 65.0
+        assert seg_risk_severe.risk_level == RiskLevel.UNKNOWN
+        assert seg_risk_severe.risk_score is None
 
         # Calm dry weather, low tide, no history -> UNKNOWN (never default to safe without sensors)
         calm_weather = WeatherTideSignal(
@@ -156,6 +159,7 @@ class TestSegmentRiskEngine:
             risk_level=RiskLevel.CRITICAL,
             source_status=DataSourceStatus.LIVE,
             spatial_match_status="OBSERVED_SEGMENT_VERIFIED",
+            evidence_eligibility=EvidenceEligibility.ROUTING_ELIGIBLE,
             line_of_sight_verified=True,
             observed_osm_way_id=5555,
             updated_at=datetime.now(timezone.utc),
