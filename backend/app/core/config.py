@@ -1,0 +1,77 @@
+"""
+Application Configuration Module using Pydantic Settings.
+Single Source of Truth for environment configurations and runtime parameters.
+"""
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """
+    Core application settings loaded from environment variables or .env file.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Database Configuration (PostgreSQL with PostGIS)
+    DATABASE_URL: str = (
+        "postgresql+asyncpg://safepath_user:safepath_password@localhost:5432/safepath_db"
+    )
+
+    # Redis Configuration (Streams and Real-time State Cache)
+    REDIS_URL: str = "redis://localhost:6379/0"
+
+    # Routing Engine (OSRM Backend)
+    OSRM_BASE_URL: str = "http://localhost:5000"
+
+    # Weather & Meteorological Service
+    OPEN_METEO_URL: str = "https://api.open-meteo.com/v1/forecast"
+
+    # HCMC VDMS Traffic Portal & Camera Scraper Settings
+    HCMC_CAMERA_BASE_URL: str = (
+        "https://giaothong.hochiminhcity.gov.vn:8007/Render/CameraHandler.ashx"
+    )
+    HCMC_CAMERA_REFERER: str = "https://giaothong.hochiminhcity.gov.vn/"
+    HCMC_CAMERA_COOKIE: str = ""
+
+    # Camera Ingestion Permissions & Security Settings
+    # Default False: requires explicit authorization to scrape/ingest external cameras
+    CAMERA_INGESTION_PERMITTED: bool = False
+    CAMERA_REQUEST_TIMEOUT_SEC: float = 6.0
+    CAMERA_MAX_CONCURRENCY: int = 4
+    CAMERA_SCRAPE_INTERVAL_SEC: int = 60
+
+    # Deprecated fallback flag kept False for strict Zero-Mock compliance
+    USE_MOCK_CAMERA_FALLBACK: bool = False
+
+    # Large Language Model API Key (Gemini / OpenAI)
+    LLM_API_KEY: str = ""
+
+    # CORS Allowed Origins (Restricted list)
+    CORS_ALLOWED_ORIGINS: list[str] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3100",
+        "http://127.0.0.1:3100",
+        "http://localhost:3102",
+        "http://127.0.0.1:3102",
+    ]
+
+    @property
+    def sync_database_url(self) -> str:
+        """
+        Derives a synchronous connection URL for synchronous drivers (psycopg2).
+        Useful for synchronous database operations, testing, or migrations.
+        """
+        url = self.DATABASE_URL
+        if url.startswith("postgresql+asyncpg://"):
+            return url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
+        return url
+
+
+# Global settings singleton
+settings = Settings()
