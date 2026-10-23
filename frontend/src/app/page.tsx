@@ -4,6 +4,9 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   CameraEvidence,
   Coordinates,
+  MapSelectionMode,
+  NavigationUXState,
+  PlaceResult,
   RiskLevel,
   SafeRouteResponse,
   WeatherTideSignal,
@@ -14,11 +17,14 @@ import {
   fetchCameras,
   fetchHealth,
   fetchWeatherTide,
+  reverseGeocode,
   searchSafeRoute,
 } from "../services/api";
 import { MapContainer } from "../components/MapContainer";
 import { CameraEvidenceModal } from "../components/CameraEvidenceModal";
-import { VoiceHUD } from "../components/VoiceHUD";
+import { NavigationGuidance } from "../components/NavigationGuidance";
+import { RouteResults } from "../components/RouteResults";
+import { PlaceSearchCombobox } from "../components/PlaceSearchCombobox";
 import {
   Navigation,
   MapPin,
@@ -34,6 +40,8 @@ import {
   CheckCircle,
   CloudRain,
   Waves,
+  Crosshair,
+  RotateCcw,
 } from "lucide-react";
 
 const HCMC_PRESETS: { name: string; coords: Coordinates }[] = [
@@ -91,8 +99,19 @@ const renderRiskBadge = (risk: RiskLevel) => {
 
 export default function SafePathDashboard() {
   const [cameras, setCameras] = useState<CameraEvidence[]>([]);
-  const [origin, setOrigin] = useState<Coordinates>(HCMC_PRESETS[0].coords);
-  const [destination, setDestination] = useState<Coordinates>(HCMC_PRESETS[2].coords);
+  const [uxState, setUxState] = useState<NavigationUXState>("IDLE");
+  const [origin, setOrigin] = useState<Coordinates | null>(HCMC_PRESETS[0].coords);
+  const [originText, setOriginText] = useState<string>(HCMC_PRESETS[0].name);
+  const [destination, setDestination] = useState<Coordinates | null>(HCMC_PRESETS[2].coords);
+  const [destinationText, setDestinationText] = useState<string>(HCMC_PRESETS[2].name);
+  const [selectedOriginPlace, setSelectedOriginPlace] = useState<PlaceResult | null>(null);
+  const [selectedDestinationPlace, setSelectedDestinationPlace] = useState<PlaceResult | null>(null);
+  const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number; accuracy?: number } | null>(null);
+  const [locationFocusToken, setLocationFocusToken] = useState(0);
+  const [isLocating, setIsLocating] = useState<boolean>(false);
+  const [locationError, setLocationError] = useState<string | null>(null);
+  const [mapSelectionMode, setMapSelectionMode] = useState<MapSelectionMode>("NONE");
+
   const [recommendedRoute, setRecommendedRoute] = useState<SafeRouteResponse | null>(null);
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
   const [alternativeRoutes, setAlternativeRoutes] = useState<SafeRouteResponse[]>([]);
@@ -100,9 +119,12 @@ export default function SafePathDashboard() {
   const [isLoadingRoute, setIsLoadingRoute] = useState<boolean>(false);
   const [routeError, setRouteError] = useState<string | null>(null);
   const requestSequenceRef = useRef(0);
+  const routeResultsRef = useRef<HTMLDivElement>(null);
+  const shouldScrollResultsRef = useRef(false);
   const [wsConnected, setWsConnected] = useState<boolean>(false);
-  const [latestAlertMessage, setLatestAlertMessage] = useState<string | null>(null);
+  const [latestAlertMessage, setLatestAlertMessage] = useState<WebSocketAlertMessage | null>(null);
   const [backendHealth, setBackendHealth] = useState<string>("checking");
+  const [sheetExpanded, setSheetExpanded] = useState(false);
   const [weatherTide, setWeatherTide] = useState<WeatherTideSignal | null>(null);
 
   // Load cameras, health & weather on initial mount
@@ -132,12 +154,8 @@ export default function SafePathDashboard() {
     // Connect to WebSocket alerts with deduplication and exponential backoff
     const disconnectWs = connectAlertsWebSocket(
       (msg: WebSocketAlertMessage) => {
-        if (msg.type === "CRITICAL_FLOOD_ALERT") {
-          setLatestAlertMessage(msg.message);
-          refreshCameras();
-          refreshWeatherTide();
-        } else if (msg.type === "FLOOD_ALL_CLEAR") {
-          setLatestAlertMessage(msg.message);
+        if (msg.type === "CRITICAL_FLOOD_ALERT" || msg.type === "FLOOD_ALL_CLEAR") {
+          setLatestAlertMessage(msg);
           refreshCameras();
           refreshWeatherTide();
         }
@@ -152,21 +170,39 @@ export default function SafePathDashboard() {
 
   // Execute safe route search
   const handleSearchRoute = useCallback(
-    async (orig: Coordinates = origin, dest: Coordinates = destination) => {
+    async (orig: Coordinates | null = origin, dest: Coordinates | null = destination) => {
+      if (!orig || !dest) {
+        setRouteError("Vui lòng chọn cả điểm xuất phát và điểm đến hợp lệ.");
+        return;
+      }
       const requestId = ++requestSequenceRef.current;
       setIsLoadingRoute(true);
       setRouteError(null);
       setRecommendedRoute(null);
       setSelectedStepIndex(null);
       setAlternativeRoutes([]);
+      setUxState("ROUTING");
+
       try {
         const routeData = await searchSafeRoute(orig, dest);
         if (requestId !== requestSequenceRef.current) return;
-        setRecommendedRoute(routeData);
-        setAlternativeRoutes(routeData.alternative_routes || []);
-      } catch (err) {
+        const routes = [routeData, ...(routeData.alternative_routes || [])];
+        const fastest = routes.reduce((best, route) => route.estimated_time_mins < best.estimated_time_mins ? route : best);
+        shouldScrollResultsRef.current = true;
+        setRecommendedRoute(fastest);
+        setAlternativeRoutes(routes.filter((route) => route.route_id !== fastest.route_id));
+        setSheetExpanded(true);
+        setUxState("ROUTE_FOUND");
+      } catch (err: any) {
         if (requestId === requestSequenceRef.current) {
-          setRouteError(err instanceof Error ? err.message : "Không thể tìm tuyến đường.");
+          const errMsg = err instanceof Error ? err.message : "Không thể tìm tuyến đường.";
+          if (errMsg.includes("PROVIDER_DOWN") || errMsg.includes("ROUTING_PROVIDER_UNAVAILABLE")) {
+            setRouteError("Dịch vụ tìm đường đang gián đoạn. Vui lòng thử lại.");
+            setUxState("PROVIDER_DOWN");
+          } else {
+            setRouteError(errMsg.includes("NO_ROUTE_FOUND") ? "Không tìm được tuyến lái xe hợp lệ giữa hai điểm." : errMsg);
+            setUxState("NO_ROUTE");
+          }
         }
       } finally {
         if (requestId === requestSequenceRef.current) setIsLoadingRoute(false);
@@ -175,43 +211,179 @@ export default function SafePathDashboard() {
     [origin, destination]
   );
 
-  // Trigger initial search once on mount
   useEffect(() => {
-    handleSearchRoute();
+    if (!recommendedRoute || !shouldScrollResultsRef.current) return;
+    shouldScrollResultsRef.current = false;
+    routeResultsRef.current?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+  }, [recommendedRoute]);
+
+  // NOTE: Zero-Mock strictly avoids auto-routing on initial mount.
+  // User must explicitly initiate routing or choose an endpoint.
+
+  const invalidateRoute = useCallback(() => {
+    requestSequenceRef.current++;
+    setRecommendedRoute(null);
+    setAlternativeRoutes([]);
+    setSelectedStepIndex(null);
+    setIsLoadingRoute(false);
+    setRouteError(null);
   }, []);
 
-  // Handle map click picking A and B
-  const [clickCount, setClickCount] = useState<number>(0);
-  const handleMapClick = (coords: Coordinates) => {
-    if (clickCount % 2 === 0) {
-      requestSequenceRef.current++;
-      setOrigin(coords);
-      setIsLoadingRoute(false);
-      setRecommendedRoute(null);
-      setAlternativeRoutes([]);
-      setClickCount((c) => c + 1);
-    } else {
-      setDestination(coords);
-      setClickCount((c) => c + 1);
-      handleSearchRoute(origin, coords);
+  // Browser Geolocation ("Vị trí của tôi")
+  const handleGetCurrentLocation = useCallback(() => {
+    if (typeof window === "undefined" || !("geolocation" in navigator)) {
+      setLocationError("Trình duyệt không hỗ trợ định vị GPS.");
+      return;
     }
-  };
+
+    setIsLocating(true);
+    setLocationError(null);
+    setUxState("LOCATION_REQUESTING");
+
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const { latitude, longitude, accuracy } = position.coords;
+        const userCoords = { lat: latitude, lng: longitude };
+        setCurrentLocation({ lat: latitude, lng: longitude, accuracy });
+        setLocationFocusToken((value) => value + 1);
+        invalidateRoute();
+        setOrigin(userCoords);
+        setIsLocating(false);
+
+        // Reverse geocode user location
+        try {
+          const rev = await reverseGeocode(latitude, longitude);
+          const nameStr = rev.name || rev.display_name;
+          setOriginText(`Vị trí của bạn (${nameStr})`);
+          setSelectedOriginPlace(rev);
+        } catch {
+          setOriginText(`Vị trí của bạn [${latitude.toFixed(4)}, ${longitude.toFixed(4)}]`);
+        }
+
+        if (destination) {
+          setUxState("READY_TO_ROUTE");
+        } else {
+          setUxState("IDLE");
+        }
+      },
+      (err) => {
+        setIsLocating(false);
+        setUxState("IDLE");
+        if (err.code === 1) {
+          setLocationError("Bạn đã từ chối cấp quyền vị trí. Vui lòng cho phép trong cài đặt trình duyệt.");
+        } else if (err.code === 2) {
+          setLocationError("Không thể xác định vị trí hiện tại của thiết bị.");
+        } else if (err.code === 3) {
+          setLocationError("Quá thời gian lấy vị trí GPS (timeout).");
+        } else {
+          setLocationError(`Lỗi định vị: ${err.message}`);
+        }
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
+    );
+  }, [destination, invalidateRoute]);
+
+  // Mode-aware Map Click Handler
+  const handleMapClick = useCallback(
+    async (coords: Coordinates) => {
+      invalidateRoute();
+
+      if (mapSelectionMode === "ORIGIN") {
+        setOrigin(coords);
+        setOriginText(`Đang xác định địa chỉ...`);
+        setMapSelectionMode("NONE");
+        try {
+          const rev = await reverseGeocode(coords.lat, coords.lng);
+          setOriginText(rev.name || rev.display_name);
+          setSelectedOriginPlace(rev);
+        } catch {
+          setOriginText(`Vị trí đã chọn [${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}]`);
+        }
+        if (destination) setUxState("READY_TO_ROUTE");
+      } else if (mapSelectionMode === "DESTINATION") {
+        setDestination(coords);
+        setDestinationText(`Đang xác định địa chỉ...`);
+        setMapSelectionMode("NONE");
+        try {
+          const rev = await reverseGeocode(coords.lat, coords.lng);
+          setDestinationText(rev.name || rev.display_name);
+          setSelectedDestinationPlace(rev);
+        } catch {
+          setDestinationText(`Vị trí đã chọn [${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}]`);
+        }
+        if (origin) setUxState("READY_TO_ROUTE");
+      } else {
+        // Default intuitive selection when mode is NONE
+        if (!origin) {
+          setOrigin(coords);
+          setOriginText(`Vị trí đã chọn [${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}]`);
+          reverseGeocode(coords.lat, coords.lng)
+            .then((rev) => {
+              setOriginText(rev.name || rev.display_name);
+              setSelectedOriginPlace(rev);
+            })
+            .catch(() => {});
+        } else {
+          setDestination(coords);
+          setDestinationText(`Vị trí đã chọn [${coords.lat.toFixed(4)}, ${coords.lng.toFixed(4)}]`);
+          reverseGeocode(coords.lat, coords.lng)
+            .then((rev) => {
+              setDestinationText(rev.name || rev.display_name);
+              setSelectedDestinationPlace(rev);
+            })
+            .catch(() => {});
+          setUxState("READY_TO_ROUTE");
+        }
+      }
+    },
+    [mapSelectionMode, origin, destination, invalidateRoute]
+  );
 
   // Swap Origin and Destination
   const handleSwap = () => {
-    const temp = origin;
+    const tempCoords = origin;
+    const tempText = originText;
+    const tempPlace = selectedOriginPlace;
+
     setOrigin(destination);
-    setDestination(temp);
-    handleSearchRoute(destination, temp);
+    setOriginText(destinationText);
+    setSelectedOriginPlace(selectedDestinationPlace);
+
+    setDestination(tempCoords);
+    setDestinationText(tempText);
+    setSelectedDestinationPlace(tempPlace);
+
+    if (destination && tempCoords && recommendedRoute) {
+      handleSearchRoute(destination, tempCoords);
+    }
   };
+
+  const handleSelectRoute = useCallback((route: SafeRouteResponse) => {
+    if (!recommendedRoute || recommendedRoute.route_id === route.route_id) return;
+    setAlternativeRoutes([recommendedRoute, ...alternativeRoutes.filter((item) => item.route_id !== route.route_id)]);
+    setRecommendedRoute(route);
+    setSelectedStepIndex(null);
+  }, [recommendedRoute, alternativeRoutes]);
 
   // Count verified cameras with active live evidence (Zero-Mock strictly enforces real status)
   const verifiedActiveCamerasCount = cameras.filter(
     (c) => c.source_status === "LIVE" && c.spatial_match_status === "OBSERVED_SEGMENT_VERIFIED" && c.risk_level !== RiskLevel.UNKNOWN
   ).length;
+  const selectedRouteExplanation = recommendedRoute ? (() => {
+    const routes = [recommendedRoute, ...alternativeRoutes];
+    const fastest = routes.reduce((best, route) => route.estimated_time_mins < best.estimated_time_mins ? route : best);
+    const name = recommendedRoute.route_id === fastest.route_id ? "Đường đề xuất theo thời gian" : "Đường đang chọn";
+    const metrics = `${recommendedRoute.estimated_time_mins.toFixed(1)} phút, ${recommendedRoute.total_distance_km.toFixed(1)} km`;
+    const allUnknown = !recommendedRoute.segments.length || recommendedRoute.segments.every((segment) =>
+      segment.risk_level === RiskLevel.UNKNOWN || segment.risk_level === RiskLevel.INSUFFICIENT_EVIDENCE
+    );
+    return allUnknown
+      ? `${name}: ${metrics}. Chưa đủ dữ liệu để xác nhận mức rủi ro trên toàn tuyến.`
+      : `${name}: ${metrics}. ${recommendedRoute.ai_explanation}`;
+  })() : "";
 
   return (
-    <div className="flex flex-col h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
+    <div className="flex flex-col h-[100dvh] w-screen overflow-hidden bg-slate-950 text-slate-100">
       {/* Top Navigation Bar */}
       <header className="h-14 border-b border-slate-800 bg-slate-900/90 backdrop-blur-md px-5 flex items-center justify-between shrink-0 z-30">
         <div className="flex items-center gap-3">
@@ -227,8 +399,8 @@ export default function SafePathDashboard() {
                 TP. Hồ Chí Minh
               </span>
             </div>
-            <p className="text-[10px] text-slate-400 leading-none mt-0.5">
-              Định tuyến ô tô theo dữ liệu OSM thực • Đánh giá rủi ro từ bằng chứng xác minh
+            <p className="hidden md:block text-[10px] text-slate-400 leading-none mt-0.5">
+              Lộ trình theo đường thực · Cảnh báo khi có dữ liệu rủi ro
             </p>
           </div>
         </div>
@@ -244,7 +416,7 @@ export default function SafePathDashboard() {
 
           {/* WebSocket Live Indicator */}
           <div
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border ${
+            className={`hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold border ${
               wsConnected
                 ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
                 : "bg-amber-500/10 border-amber-500/30 text-amber-400"
@@ -257,10 +429,166 @@ export default function SafePathDashboard() {
       </header>
 
       {/* Main App Workspace */}
-      <div className="flex flex-1 overflow-hidden relative">
+      <div className="flex flex-1 min-h-0 overflow-hidden relative">
         {/* Left Control Sidebar */}
-        <aside className="w-full sm:w-[460px] h-full flex flex-col border-r border-slate-800 bg-slate-900/95 backdrop-blur-md z-20 overflow-y-auto shrink-0 shadow-2xl">
+        <aside className={`absolute bottom-0 left-0 right-0 z-20 flex flex-col overflow-y-auto rounded-t-2xl border-t border-slate-700 bg-slate-900/95 shadow-2xl backdrop-blur-md transition-[height] duration-200 md:static md:h-full md:w-[420px] md:shrink-0 md:rounded-none md:border-r md:border-t-0 ${sheetExpanded ? "h-[min(55dvh,580px)]" : "h-[min(37dvh,280px)]"}`}>
+          <button type="button" className="sticky top-0 z-30 flex min-h-10 items-center justify-center bg-slate-900 text-xs font-semibold text-slate-300 md:hidden" aria-label={sheetExpanded ? "Thu gọn bảng tuyến đường" : "Mở bảng tuyến đường"} aria-expanded={sheetExpanded} onClick={() => setSheetExpanded((v) => !v)}><span className="h-1.5 w-10 rounded-full bg-slate-500" /></button>
           <div className="p-4 space-y-4">
+            {/* Origin & Destination Route Search Form */}
+            <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 space-y-3.5 shadow-inner">
+              <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+                    Tuyến đường
+                  </span>
+
+                </div>
+                <button
+                  type="button"
+                  onClick={handleSwap}
+                  className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition"
+                  title="Đảo chiều điểm đi và điểm đến"
+                  aria-label="Đảo chiều lộ trình"
+                >
+                  <ArrowRightLeft className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Geolocation Error Alert if any */}
+              {locationError && (
+                <div role="alert" className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-2.5 text-xs text-amber-300 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div className="flex-1 leading-relaxed">
+                    {locationError}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setLocationError(null)}
+                    className="text-amber-400 hover:text-white text-xs"
+                  >
+                    Đóng
+                  </button>
+                </div>
+              )}
+
+              {/* Origin Selection Combobox */}
+              <PlaceSearchCombobox
+                label="Từ đâu?"
+                placeholder="Nhập địa chỉ, tên đường hoặc tọa độ..."
+                color="emerald"
+                value={originText}
+                onChangeText={(t) => {
+                  invalidateRoute();
+                  setOriginText(t);
+                  setOrigin(null);
+                }}
+                selectedCoordinates={origin}
+                onSelectPlace={(p) => {
+                  if (p) {
+                    setOrigin({ lat: p.lat, lng: p.lng });
+                    setSelectedOriginPlace(p);
+                    if (destination) setUxState("READY_TO_ROUTE");
+                  } else {
+                    setOrigin(null);
+                    setSelectedOriginPlace(null);
+                  }
+                }}
+                onLocateMe={handleGetCurrentLocation}
+                isLocating={isLocating}
+                isPickingOnMap={mapSelectionMode === "ORIGIN"}
+                onTogglePickOnMap={() => setMapSelectionMode((m) => (m === "ORIGIN" ? "NONE" : "ORIGIN"))}
+                ariaLabel="Từ đâu? Điểm xuất phát"
+                testId="origin-combobox"
+              />
+
+              {/* Destination Selection Combobox */}
+              <PlaceSearchCombobox
+                label="Đến đâu?"
+                placeholder="Nhập địa chỉ, tên đường hoặc tọa độ..."
+                color="rose"
+                value={destinationText}
+                onChangeText={(t) => {
+                  invalidateRoute();
+                  setDestinationText(t);
+                  setDestination(null);
+                }}
+                selectedCoordinates={destination}
+                onSelectPlace={(p) => {
+                  if (p) {
+                    setDestination({ lat: p.lat, lng: p.lng });
+                    setSelectedDestinationPlace(p);
+                    if (origin) setUxState("READY_TO_ROUTE");
+                  } else {
+                    setDestination(null);
+                    setSelectedDestinationPlace(null);
+                  }
+                }}
+                isPickingOnMap={mapSelectionMode === "DESTINATION"}
+                onTogglePickOnMap={() => setMapSelectionMode((m) => (m === "DESTINATION" ? "NONE" : "DESTINATION"))}
+                ariaLabel="Đến đâu? Điểm đến"
+                testId="destination-combobox"
+              />
+
+              {/* Quick Presets Chips */}
+              <div className="pt-2 border-t border-slate-800/80">
+                <span className="text-[10px] text-slate-500 block mb-1.5 font-medium">
+                  Địa điểm gợi ý nhanh tại TP.HCM:
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {HCMC_PRESETS.map((p) => (
+                    <button
+                      key={p.name}
+                      type="button"
+                      onClick={() => {
+                        invalidateRoute();
+                        if (!origin) {
+                          setOrigin(p.coords);
+                          setOriginText(p.name);
+                        } else {
+                          setDestination(p.coords);
+                          setDestinationText(p.name);
+                          setUxState("READY_TO_ROUTE");
+                        }
+                      }}
+                      className="px-2 py-0.5 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-800 text-[10px] text-slate-300 hover:text-white transition"
+                    >
+                      {p.name.split(" (")[0]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Search Button */}
+              <button
+                type="button"
+                onClick={() => handleSearchRoute()}
+                disabled={isLoadingRoute || !origin || !destination}
+                className="w-full mt-2 py-2.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 transition"
+              >
+                {isLoadingRoute ? (
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <Search className="w-4 h-4" />
+                )}
+                <span>
+                  {!origin || !destination
+                    ? "Vui lòng chọn Điểm đi và Điểm đến"
+                    : "Tìm tuyến đường"}
+                </span>
+              </button>
+
+              {routeError && (
+                <div role="alert" className="rounded-lg border border-rose-500/50 bg-rose-950/40 p-3 text-xs text-rose-200">
+                  <p>Không có tuyến để hiển thị: {routeError}</p>
+                  <button type="button" className="mt-2 underline" onClick={() => handleSearchRoute()}>Thử lại</button>
+                </div>
+              )}
+            </div>
+
+            {recommendedRoute ? <div ref={routeResultsRef} className="space-y-3 scroll-mt-3">
+              <NavigationGuidance route={recommendedRoute} explanation={selectedRouteExplanation} latestAlert={latestAlertMessage} onPositionUpdate={setCurrentLocation} />
+              <RouteResults selected={recommendedRoute} alternatives={alternativeRoutes} selectedStepIndex={selectedStepIndex} onSelect={handleSelectRoute} onSelectStep={setSelectedStepIndex} onSelectCamera={setSelectedCamera} />
+            </div> : <NavigationGuidance route={null} explanation="" latestAlert={latestAlertMessage} onPositionUpdate={setCurrentLocation} />}
             {/* Environmental Conditions Widget (Weather & Tide) */}
             <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-3.5 space-y-2.5 shadow-inner">
               <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
@@ -312,236 +640,11 @@ export default function SafePathDashboard() {
               )}
             </div>
 
-            {/* Origin & Destination Route Search Form */}
-            <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 space-y-3 shadow-inner">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-                  Kế Hoạch Lộ Trình
-                </span>
-                <button
-                  onClick={handleSwap}
-                  className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white transition"
-                  title="Đảo chiều điểm đi và điểm đến"
-                >
-                  <ArrowRightLeft className="w-4 h-4" />
-                </button>
-              </div>
-
-              {/* Origin Selection */}
-              <div className="space-y-1">
-                <label className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                  Điểm Xuất Phát (A)
-                </label>
-                <select
-                  value={`${origin.lat},${origin.lng}`}
-                  onChange={(e) => {
-                    const [lat, lng] = e.target.value.split(",").map(Number);
-                    setOrigin({ lat, lng });
-                    requestSequenceRef.current++;
-                    setIsLoadingRoute(false);
-                    setRecommendedRoute(null);
-                    setAlternativeRoutes([]);
-                  }}
-                  className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
-                >
-                  {HCMC_PRESETS.map((p) => (
-                    <option key={p.name} value={`${p.coords.lat},${p.coords.lng}`}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Destination Selection */}
-              <div className="space-y-1">
-                <label className="text-[11px] font-semibold text-rose-400 flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-rose-500" />
-                  Điểm Đến (B)
-                </label>
-                <select
-                  value={`${destination.lat},${destination.lng}`}
-                  onChange={(e) => {
-                    const [lat, lng] = e.target.value.split(",").map(Number);
-                    setDestination({ lat, lng });
-                    requestSequenceRef.current++;
-                    setIsLoadingRoute(false);
-                    setRecommendedRoute(null);
-                    setAlternativeRoutes([]);
-                  }}
-                  className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
-                >
-                  {HCMC_PRESETS.map((p) => (
-                    <option key={p.name} value={`${p.coords.lat},${p.coords.lng}`}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Search Button */}
-              <button
-                onClick={() => handleSearchRoute()}
-                disabled={isLoadingRoute}
-                className="w-full mt-2 py-2.5 px-4 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl flex items-center justify-center gap-2 shadow-lg shadow-blue-600/20 transition"
-              >
-                {isLoadingRoute ? (
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <Search className="w-4 h-4" />
-                )}
-                <span>Tìm tuyến đường OSM</span>
-              </button>
-              {routeError && (
-                <div role="alert" className="rounded-lg border border-rose-500/50 bg-rose-950/40 p-3 text-xs text-rose-200">
-                  <p>Không có tuyến để hiển thị: {routeError}</p>
-                  <button type="button" className="mt-2 underline" onClick={() => handleSearchRoute()}>Thử lại</button>
-                </div>
-              )}
-            </div>
-
-            {/* Voice HUD & AI Explanation Card */}
-            <VoiceHUD
-              explanation={recommendedRoute?.ai_explanation || ""}
-              overallRisk={recommendedRoute?.overall_risk || RiskLevel.UNKNOWN}
-              latestAlert={latestAlertMessage}
-            />
-
-            {/* Candidate Route Results */}
-            {recommendedRoute && (
-              <div className="space-y-3">
-                <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-                  Các tuyến OSRM và độ phủ dữ liệu
-                </h3>
-
-                {/* Primary Recommended Route (#1) */}
-                <div className="bg-slate-900 border-2 border-blue-500/50 rounded-2xl p-4 space-y-3 shadow-lg relative overflow-hidden">
-                  <div className="absolute top-0 right-0 bg-blue-500 text-white font-black text-[10px] uppercase px-3 py-0.5 rounded-bl-lg tracking-wider">
-                    Tuyến đang chọn
-                  </div>
-
-                  <div className="flex items-center justify-between pr-20">
-                    <div>
-                      <div className="text-xl font-black text-white">
-                        {recommendedRoute.estimated_time_mins.toFixed(0)}{" "}
-                        <span className="text-xs font-normal text-slate-400">phút</span>
-                      </div>
-                      <div className="text-xs text-slate-400 mt-0.5">
-                        Khoảng cách: <strong>{recommendedRoute.total_distance_km.toFixed(1)} km</strong>
-                      </div>
-                      {recommendedRoute.ranking_cost && (
-                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">
-                          Chi phí xếp hạng rủi ro: {recommendedRoute.ranking_cost.toFixed(1)}
-                        </div>
-                      )}
-                    </div>
-
-                    <div>
-                      {renderRiskBadge(recommendedRoute.overall_risk)}
-                    </div>
-                  </div>
-                  <p className="text-xs text-slate-300">{recommendedRoute.ai_explanation} Hành lang: {coverageLabel(recommendedRoute.evidence_coverage)}.</p>
-
-                  {/* Route Segments & Evidence Cameras */}
-                  <div className="pt-2 border-t border-slate-800 space-y-2">
-                    <span className="text-[11px] font-semibold text-slate-300">
-                      Bước dẫn đường OSRM & dữ liệu đường OSM:
-                    </span>
-                    <div className="space-y-1.5">
-                      {recommendedRoute.segments.map((seg, idx) => (
-                        <div
-                          key={idx}
-                          className="bg-slate-950/60 border border-slate-800/80 rounded-lg p-2 text-xs flex items-center justify-between"
-                        >
-                          <div>
-                            <span className="font-semibold text-white">
-                              {seg.street_name || "Đoạn đường đô thị"}
-                            </span>
-                            <span className="text-[10px] text-slate-400 ml-1.5">
-                              ({(seg.length_meters / 1000).toFixed(1)} km)
-                            </span>
-                            <span className="block text-[10px] text-slate-400">{coverageLabel(seg.evidence_coverage)}</span>
-                            <span className="block text-[10px] text-slate-500">
-                              {seg.osm_way_id && seg.osm_edge_index ? `OSM Way ${seg.osm_way_id}, cạnh ${seg.osm_edge_index} đã xác minh` :
-                                `${seg.candidate_road_edges?.length || 0} cạnh OSM ứng viên; ID đoạn chưa xác minh`}
-                            </span>
-                            {seg.geojson_path && (
-                              <button type="button" className="text-[10px] text-amber-300 underline mt-1"
-                                onClick={() => setSelectedStepIndex(selectedStepIndex === idx ? null : idx)}>
-                                {selectedStepIndex === idx ? "Ẩn đoạn trên bản đồ" : "Xem đoạn trên bản đồ"}
-                              </button>
-                            )}
-                          </div>
-
-                          <div className="flex items-center gap-1">
-                            {seg.evidence_cameras.map((c) => (
-                              <button
-                                key={c.cam_id}
-                                onClick={() => setSelectedCamera(c)}
-                                className="px-1.5 py-0.5 bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 text-[10px] rounded font-mono font-bold transition flex items-center gap-1"
-                                title="Xem ảnh phân tích camera"
-                              >
-                                <span>📹</span>
-                                <span>{c.code || "CAM"}</span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Alternative Routes */}
-                {alternativeRoutes.map((alt, altIdx) => (
-                  <div
-                    key={alt.route_id || altIdx}
-                    className="bg-slate-950/80 border border-slate-700/50 rounded-2xl p-4 space-y-2 text-xs text-slate-300 opacity-80 hover:opacity-100 transition"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="font-bold text-white">
-                          Tuyến ứng viên #{altIdx + 1}
-                        </span>
-                        <div className="text-[11px] text-slate-400">
-                          {alt.total_distance_km.toFixed(1)} km • OSRM ước tính:{" "}
-                          <strong className="text-blue-400">
-                            {alt.estimated_time_mins.toFixed(0)} phút
-                          </strong>
-                        </div>
-                      </div>
-
-                      <div>
-                        {renderRiskBadge(alt.overall_risk)}
-                      </div>
-                    </div>
-
-                    <p className="text-[11px] text-slate-300/80 italic">
-                      {alt.ai_explanation} {coverageLabel(alt.evidence_coverage)}.
-                    </p>
-                    <button
-                      type="button"
-                      className="underline text-blue-300 hover:text-blue-200 font-semibold"
-                      onClick={() => {
-                        setRecommendedRoute(alt);
-                        setSelectedStepIndex(null);
-                        setAlternativeRoutes([
-                          recommendedRoute,
-                          ...alternativeRoutes.filter((c) => c.route_id !== alt.route_id),
-                        ]);
-                      }}
-                    >
-                      Chọn tuyến này
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         </aside>
 
         {/* Right Main Map Container */}
-        <main className="flex-1 h-full relative">
+        <main className={`flex-1 h-full min-w-0 relative md:pb-0 ${sheetExpanded ? "pb-[min(55dvh,580px)]" : "pb-[min(37dvh,280px)]"}`}>
           <MapContainer
             cameras={cameras}
             recommendedRoute={recommendedRoute}
@@ -549,8 +652,14 @@ export default function SafePathDashboard() {
             highlightedSegment={selectedStepIndex === null ? null : recommendedRoute?.segments[selectedStepIndex]}
             origin={origin}
             destination={destination}
+            currentLocation={currentLocation}
+            locationFocusToken={locationFocusToken}
+            mapSelectionMode={mapSelectionMode}
             onMapClickCoordinates={handleMapClick}
-            onSelectCamera={(cam) => setSelectedCamera(cam)}
+            onSelectCamera={setSelectedCamera}
+            onSelectRoute={handleSelectRoute}
+            onRequestCurrentLocation={handleGetCurrentLocation}
+            isRequestingLocation={isLocating}
           />
         </main>
       </div>

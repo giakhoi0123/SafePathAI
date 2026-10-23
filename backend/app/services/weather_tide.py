@@ -76,12 +76,8 @@ async def fetch_hcm_weather(
                 observed_at = None
                 if data.get("rain_observed_at"):
                     observed_at = datetime.fromisoformat(data["rain_observed_at"])
-                return (
-                    data.get("rain_mm_per_hour"),
-                    data.get("rain_status", "LIVE"),
-                    observed_at,
-                    data.get("weather_code"),
-                )
+                if observed_at is not None:
+                    return (data.get("rain_mm_per_hour"), data.get("rain_status", "LIVE"), observed_at, data.get("weather_code"))
         except Exception as exc:
             logger.debug("Redis weather cache read failed: %s", exc)
 
@@ -113,9 +109,9 @@ async def fetch_hcm_weather(
                 try:
                     observed_at = datetime.fromisoformat(time_str)
                 except ValueError:
-                    observed_at = datetime.now(timezone.utc)
-            else:
-                observed_at = datetime.now(timezone.utc)
+                    pass
+            if observed_at is None or rain_mm is None:
+                return (None, "WEATHER_UNAVAILABLE", None, weather_code)
 
             rain_status = "LIVE"
 
@@ -190,8 +186,6 @@ async def ingest_verified_tide_bulletin(
 
 
 async def fetch_tide_signal(
-    simulate_high_tide: bool = False,
-    tide_override_meters: Optional[float] = None,
     now: Optional[datetime] = None,
     redis_client: Optional[Redis] = None,
 ) -> WeatherTideSignal:
@@ -199,28 +193,12 @@ async def fetch_tide_signal(
     Retrieves the current tidal observation for HCMC stations.
     
     Zero-Mock Rules:
-    - If simulate_high_tide or tide_override_meters is provided, marks tide_status="SIMULATED"
-      and returns the simulated value (for demo/testing only).
-    - Otherwise, checks Redis for an active verified bulletin.
+    - Checks Redis for an active verified bulletin.
     - If no verified bulletin exists, returns tide_status="TIDE_UNAVAILABLE", tide_level_meters=None.
       NEVER generates harmonic sine waves or assumes calm tides.
     """
     if now is None:
         now = datetime.now(timezone.utc)
-
-    if simulate_high_tide or tide_override_meters is not None:
-        level = float(tide_override_meters) if tide_override_meters is not None else 1.72
-        return WeatherTideSignal(
-            rain_mm_per_hour=None,
-            rain_status="WEATHER_UNAVAILABLE",
-            tide_level_meters=level,
-            tide_status="SIMULATED",
-            tide_station="Trạm Phú An (Mô phỏng)",
-            tide_datum=DATUM_HON_DAU_VN2000,
-            is_high_tide_alert=level >= HIGH_TIDE_ALERT_THRESHOLD_METERS,
-            timestamp=now,
-            source_url="simulation://test-rig",
-        )
 
     # Check for verified bulletin in Redis
     close_redis = False
@@ -252,7 +230,7 @@ async def fetch_tide_signal(
         tide_station=None,
         tide_datum=DATUM_HON_DAU_VN2000,
         is_high_tide_alert=None,
-        timestamp=now,
+        timestamp=None,
         source_url=None,
     )
 
@@ -260,8 +238,6 @@ async def fetch_tide_signal(
 async def get_combined_weather_tide(
     lat: float = 10.7769,
     lng: float = 106.7009,
-    simulate_high_tide: bool = False,
-    tide_override_meters: Optional[float] = None,
     client: Optional[httpx.AsyncClient] = None,
     redis_client: Optional[Redis] = None,
 ) -> WeatherTideSignal:
@@ -269,14 +245,10 @@ async def get_combined_weather_tide(
     Gathers both Open-Meteo weather precipitation and tide signal into a unified WeatherTideSignal.
     Zero-Mock: All fields reflect verified inputs; missing measurements are explicitly None.
     """
-    now = datetime.now(timezone.utc)
     rain_mm, rain_status, rain_observed_at, weather_code = await fetch_hcm_weather(
         lat=lat, lng=lng, client=client, redis_client=redis_client
     )
     tide_signal = await fetch_tide_signal(
-        simulate_high_tide=simulate_high_tide,
-        tide_override_meters=tide_override_meters,
-        now=now,
         redis_client=redis_client,
     )
 
@@ -290,7 +262,7 @@ async def get_combined_weather_tide(
         tide_station=tide_signal.tide_station,
         tide_datum=tide_signal.tide_datum,
         is_high_tide_alert=tide_signal.is_high_tide_alert,
-        timestamp=now,
+        timestamp=rain_observed_at or tide_signal.timestamp,
         source_url=settings.OPEN_METEO_URL if rain_status == "LIVE" else tide_signal.source_url,
     )
 

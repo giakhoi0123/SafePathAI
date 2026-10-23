@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test:navigation": "node --test tests/navigation-guidance.test.mjs"
   },
   "dependencies": {
     "@deck.gl/core": "^9.0.32",

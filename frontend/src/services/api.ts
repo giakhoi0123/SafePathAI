@@ -6,7 +6,10 @@
 
 import {
   CameraEvidence,
+  CameraImageMetadata,
   Coordinates,
+  PlaceResult,
+  PlaceSearchResponse,
   RouteSearchRequest,
   SafeRouteResponse,
   WeatherTideSignal,
@@ -19,11 +22,34 @@ const API_BASE_URL =
 const WS_BASE_URL =
   process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
 
+const SAFE_CAM_ID_REGEX = /^[a-zA-Z0-9_\-]{1,64}$/;
+
 /**
- * Returns full URL to fetch a camera's verified snapshot.
+ * Returns full URL to fetch a camera's verified snapshot with path-traversal guard.
  */
 export function getCameraImageUrl(camId: string): string {
+  if (!camId || !SAFE_CAM_ID_REGEX.test(camId)) {
+    return "";
+  }
   return `${API_BASE_URL}/api/v1/cameras/${encodeURIComponent(camId)}/image`;
+}
+
+/**
+ * Fetches structured technical metadata for a camera snapshot (provenance, eligibility, headers).
+ */
+export async function fetchCameraMetadata(camId: string): Promise<CameraImageMetadata> {
+  if (!camId || !SAFE_CAM_ID_REGEX.test(camId)) {
+    throw new Error("Mã định danh camera không hợp lệ.");
+  }
+  const res = await fetch(`${API_BASE_URL}/api/v1/cameras/${encodeURIComponent(camId)}/metadata`, {
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.detail?.message || `Lỗi tải thông tin camera (${res.status})`);
+  }
+  return await res.json();
 }
 
 /**
@@ -83,6 +109,56 @@ export async function searchSafeRoute(
     console.error("Error in searchSafeRoute:", error);
     throw error;
   }
+}
+
+/**
+ * Searches places, addresses, streets, and POIs in TP.HCM.
+ */
+export async function searchPlaces(
+  query: string,
+  limit: number = 6,
+  signal?: AbortSignal
+): Promise<PlaceSearchResponse> {
+  const url = new URL(`${API_BASE_URL}/api/v1/places/search`);
+  url.searchParams.set("q", query);
+  url.searchParams.set("limit", String(limit));
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    signal,
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to search places: ${res.status}`);
+  }
+
+  return await res.json();
+}
+
+/**
+ * Reverse geocodes coordinates to a place name/address.
+ */
+export async function reverseGeocode(
+  lat: number,
+  lng: number,
+  signal?: AbortSignal
+): Promise<PlaceResult> {
+  const url = new URL(`${API_BASE_URL}/api/v1/places/reverse`);
+  url.searchParams.set("lat", String(lat));
+  url.searchParams.set("lng", String(lng));
+
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    signal,
+    headers: { "Content-Type": "application/json" },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to reverse geocode: ${res.status}`);
+  }
+
+  return await res.json();
 }
 
 /**

@@ -18,6 +18,7 @@ from backend.app.db.session import get_redis_client
 from backend.app.schemas.contracts import (
     CameraEvidence,
     DataSourceStatus,
+    EvidenceEligibility,
     RiskLevel,
     RouteSegmentRisk,
     WeatherTideSignal,
@@ -51,11 +52,8 @@ def calculate_segment_risk(
     Zero-Mock Principles:
     - Only cameras with OBSERVED_SEGMENT_VERIFIED and fresh LIVE status can provide camera scoring.
       Spatially near cameras without verified view orientation cannot score the road.
-    - If a segment is historically flood-prone:
-        - Heavy rain (>= 30 mm/h) or high tide alert triggers CRITICAL risk.
-        - Moderate rain (>= 10 mm/h) triggers MODERATE risk.
-        - Verified clear weather and no tide yields SAFE current condition with historical flag.
-        - Missing weather/tide yields UNKNOWN risk (never assumed safe).
+    - Historical flood points and regional weather are context, not a current
+      measurement of water on this exact road segment.
     - If a segment has no verified camera observations and is not flood-prone:
         - Returns RiskLevel.UNKNOWN with risk_score = None.
     """
@@ -108,6 +106,7 @@ def calculate_segment_risk(
         and cam.coordinate_source_url
         and cam.view_verification_source_url
         and cam.line_of_sight_verified
+        and cam.evidence_eligibility == EvidenceEligibility.ROUTING_ELIGIBLE
         and (cam.source_status == DataSourceStatus.LIVE or cam.source_status.value == "LIVE")
         and cam.updated_at.tzinfo is not None
         and 0 <= (now - cam.updated_at).total_seconds() <= 120
@@ -117,12 +116,15 @@ def calculate_segment_risk(
     severe_camera_flood = False
     freshness_seconds: Optional[float] = None
 
-    if verified_cams:
+    cams_with_metrics = [c for c in verified_cams if c.flood_ratio is not None and c.traffic_density_score is not None]
+    if cams_with_metrics:
         camera_risk_score = round(
-            max(cam.flood_ratio * 75.0 + cam.traffic_density_score * 25.0 for cam in verified_cams),
+            max(cam.flood_ratio * 75.0 + cam.traffic_density_score * 25.0 for cam in cams_with_metrics),
             2,
         )
-        severe_camera_flood = any(cam.flood_ratio >= AUTO_CRITICAL_FLOOD_RATIO for cam in verified_cams)
+        severe_camera_flood = any(cam.flood_ratio >= AUTO_CRITICAL_FLOOD_RATIO for cam in cams_with_metrics)
+
+    if verified_cams:
         freshness_seconds = min((now - cam.updated_at).total_seconds() for cam in verified_cams)
 
     # 2. Evaluate Weather & Tide inputs
@@ -131,8 +133,20 @@ def calculate_segment_risk(
     tide_alert: Optional[bool] = None
 
     if weather_tide is not None:
-        rain_mm = weather_tide.rain_mm_per_hour
-        tide_alert = weather_tide.is_high_tide_alert
+        rain_observed = weather_tide.rain_observed_at
+        rain_fresh = (
+            weather_tide.rain_status == "LIVE" and weather_tide.source_url
+            and rain_observed is not None and rain_observed.tzinfo is not None
+            and 0 <= (now - rain_observed).total_seconds() <= 900
+        )
+        rain_mm = weather_tide.rain_mm_per_hour if rain_fresh else None
+        tide_observed = weather_tide.timestamp
+        tide_fresh = (
+            weather_tide.tide_status == "LIVE" and weather_tide.source_url
+            and tide_observed is not None and tide_observed.tzinfo is not None
+            and 0 <= (now - tide_observed).total_seconds() <= 10800
+        )
+        tide_alert = weather_tide.is_high_tide_alert if tide_fresh else None
 
         if rain_mm is not None:
             if rain_mm >= HEAVY_RAIN_THRESHOLD_MM_H:
@@ -146,11 +160,8 @@ def calculate_segment_risk(
         else:
             weather_risk = "UNKNOWN"
 
-        if freshness_seconds is None and weather_tide.rain_observed_at is not None:
-            dt = weather_tide.rain_observed_at
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            freshness_seconds = max(0.0, (now - dt).total_seconds())
+        if freshness_seconds is None and rain_fresh:
+            freshness_seconds = (now - rain_observed).total_seconds()
 
     # 3. Determine Risk Level and Multi-Criteria Score
     risk_level = RiskLevel.UNKNOWN
@@ -161,45 +172,15 @@ def calculate_segment_risk(
         risk_level = RiskLevel.CRITICAL
         final_score = max(camera_risk_score or 0.0, 75.0)
 
-    # Case B: Street is documented in municipal historical flood points
-    elif is_flood_prone_history is True:
-        # Check active weather/tide triggers
-        if weather_risk == "HEAVY_RAIN":
-            risk_level = RiskLevel.CRITICAL
-            final_score = max(camera_risk_score or 0.0, 80.0)
-        elif tide_alert is True:
-            risk_level = RiskLevel.CRITICAL
-            final_score = max(camera_risk_score or 0.0, 75.0)
-        elif weather_risk == "MODERATE_RAIN":
-            risk_level = RiskLevel.MODERATE
-            final_score = max(camera_risk_score or 0.0, 45.0)
-        elif camera_risk_score is not None:
-            if camera_risk_score >= CRITICAL_RISK_THRESHOLD:
-                risk_level = RiskLevel.CRITICAL
-            elif camera_risk_score >= MODERATE_RISK_THRESHOLD:
-                risk_level = RiskLevel.MODERATE
-            else:
-                risk_level = RiskLevel.SAFE
-            final_score = camera_risk_score
-        elif weather_risk == "CLEAR" and tide_alert is False:
-            # Verified clear weather & no high tide -> current risk is SAFE
-            risk_level = RiskLevel.SAFE
-            final_score = 15.0  # Low baseline historical caution
-        else:
-            # Weather or tide is unobserved / unknown -> cannot claim safe
-            risk_level = RiskLevel.UNKNOWN
-            final_score = None
-
-    # Case C: Street is not historically flood prone, but has verified camera
+    # A camera can show a current hazard. A low score at one view cannot
+    # establish that the entire road segment is safe.
     elif camera_risk_score is not None:
-        final_score = camera_risk_score
         if camera_risk_score >= CRITICAL_RISK_THRESHOLD:
             risk_level = RiskLevel.CRITICAL
+            final_score = camera_risk_score
         elif camera_risk_score >= MODERATE_RISK_THRESHOLD:
             risk_level = RiskLevel.MODERATE
-        else:
-            # A clear frame at one camera does not establish that the whole Way is SAFE
-            risk_level = RiskLevel.UNKNOWN
+            final_score = camera_risk_score
 
     # Case D: No verified camera, no active flood history match
     else:

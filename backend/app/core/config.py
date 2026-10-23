@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # Routing Engine (OSRM Backend)
     OSRM_BASE_URL: str = "http://localhost:5000"
+    OSRM_GRAPH_VERSION: str = ""
 
     # Weather & Meteorological Service
     OPEN_METEO_URL: str = "https://api.open-meteo.com/v1/forecast"
@@ -41,6 +42,17 @@ class Settings(BaseSettings):
     # Camera Ingestion Permissions & Security Settings
     # Default False: requires explicit authorization to scrape/ingest external cameras
     CAMERA_INGESTION_PERMITTED: bool = False
+
+    # Granular Provider Capability Configuration
+    # Allows viewing permitted/public snapshots without elevating them to routing evidence
+    CAMERA_ALLOW_VIEW_ONLY: bool = True
+    # Only allow altering route risk scores if explicit verified permission and calibration exist
+    CAMERA_ROUTING_EVIDENCE_PERMITTED: bool = False
+    # Freshness threshold: snapshots older than 180s (3m) are classified as STALE, never LIVE
+    CAMERA_IMAGE_TTL_SECONDS: int = 180
+    # Storage retention threshold: clean up cached frames older than 24h
+    CAMERA_DISK_EVICTION_MAX_HOURS: int = 24
+
     CAMERA_REQUEST_TIMEOUT_SEC: float = 6.0
     CAMERA_MAX_CONCURRENCY: int = 4
     CAMERA_SCRAPE_INTERVAL_SEC: int = 60

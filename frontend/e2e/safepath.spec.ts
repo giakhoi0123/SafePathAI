@@ -20,6 +20,7 @@ test("OSRM route appears on the live map", async ({ page }) => {
   page.on("pageerror", (err) => console.error(`[BROWSER ERROR]`, err));
 
   await page.goto("/");
+  await page.getByRole("button", { name: "Tìm tuyến đường" }).click();
   await expect(page.getByText("Tuyến đang chọn")).toBeVisible({ timeout: 15000 });
   await expect(page.locator(".maplibregl-canvas")).toBeVisible();
   await expect(page.locator("[data-route-vertices]")).toHaveAttribute("data-route-vertices", /^\d{2,}$/);
@@ -34,7 +35,7 @@ test("OSRM route appears on the live map", async ({ page }) => {
   await page.getByRole("button", { name: "Zoom in" }).click();
   await page.waitForTimeout(600);
   await page.screenshot({ path: "test-results/osrm-live-map-detail.png", fullPage: true });
-  const candidateButton = page.getByRole("button", { name: "Chọn tuyến này" }).first();
+  const candidateButton = page.getByRole("button", { name: /^Chọn Đường khác/ }).first();
   if (await candidateButton.count()) {
     await candidateButton.click();
     await expect(page.getByText("Tuyến đang chọn")).toBeVisible();
@@ -44,19 +45,40 @@ test("OSRM route appears on the live map", async ({ page }) => {
 });
 
 test("five independent HCMC pairs render real routes on tiles", async ({ page }) => {
+  test.setTimeout(90000);
   await page.goto("/");
   const pairs = [
-    ["Chợ Bến Thành (Quận 1)", "Ngã tư Hàng Xanh (Bình Thạnh)"],
-    ["Sân bay Tân Sơn Nhất", "Chợ Bến Thành (Quận 1)"],
-    ["Landmark 81 (Bình Thạnh)", "Ngã tư Hàng Xanh (Bình Thạnh)"],
-    ["Nhà thờ Đức Bà (Quận 1)", "Landmark 81 (Bình Thạnh)"],
-    ["Đường Nguyễn Hữu Cảnh", "Sân bay Tân Sơn Nhất"],
+    ["Chợ Bến Thành", "Ngã tư Hàng Xanh"],
+    ["Sân bay Tân Sơn Nhất", "Chợ Bến Thành"],
+    ["Landmark 81", "Ngã tư Hàng Xanh"],
+    ["Nhà thờ Đức Bà", "Landmark 81"],
+    ["Nguyễn Hữu Cảnh", "Sân bay Tân Sơn Nhất"],
   ];
   for (let index = 0; index < pairs.length; index++) {
-    const [origin, destination] = pairs[index];
-    await page.getByRole("combobox").nth(0).selectOption({ label: origin });
-    await page.getByRole("combobox").nth(1).selectOption({ label: destination });
-    await page.getByRole("button", { name: "Tìm tuyến đường OSM" }).click();
+    const [originQuery, destQuery] = pairs[index];
+
+    // Fill origin via scoped testId
+    const originBox = page.getByTestId("origin-combobox");
+    const originInput = originBox.getByRole("combobox");
+    await originInput.fill(originQuery);
+    const originOption = originBox.getByRole("option").filter({ hasText: originQuery }).first();
+    await expect(originOption).toBeVisible({ timeout: 5000 });
+    await originOption.click();
+    await expect(originBox.getByRole("listbox")).toHaveCount(0);
+
+    // Fill destination via scoped testId
+    const destBox = page.getByTestId("destination-combobox");
+    const destInput = destBox.getByRole("combobox");
+    await destInput.fill(destQuery);
+    const destOption = destBox.getByRole("option").filter({ hasText: destQuery }).first();
+    await expect(destOption).toBeVisible({ timeout: 5000 });
+    await destOption.click();
+    await expect(destBox.getByRole("listbox")).toHaveCount(0);
+
+    const searchBtn = page.getByRole("button", { name: "Tìm tuyến đường" });
+    await expect(searchBtn).toBeEnabled({ timeout: 5000 });
+    await searchBtn.click();
+
     await expect(page.getByText("Tuyến đang chọn")).toBeVisible({ timeout: 15000 });
     await expect(page.locator("[data-route-vertices]")).toHaveAttribute("data-route-vertices", /^\d{2,}$/);
     await expect(page.locator("[data-tiles-ready='true']")).toBeVisible({ timeout: 15000 });

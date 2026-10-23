@@ -18,6 +18,18 @@ export enum DataSourceStatus {
   SIMULATED = "SIMULATED",
 }
 
+export enum ImageAccessStatus {
+  VIEWABLE_PUBLIC = "VIEWABLE_PUBLIC",
+  VIEWABLE_AUTHORIZED = "VIEWABLE_AUTHORIZED",
+  EXTERNAL_ACCESS_RESTRICTED = "EXTERNAL_ACCESS_RESTRICTED",
+  UNAVAILABLE = "UNAVAILABLE",
+}
+
+export enum EvidenceEligibility {
+  ROUTING_ELIGIBLE = "ROUTING_ELIGIBLE",
+  NOT_VERIFIED_FOR_ROUTING = "NOT_VERIFIED_FOR_ROUTING",
+}
+
 export interface CameraEvidence {
   cam_id: string;
   code?: string | null;
@@ -33,12 +45,55 @@ export interface CameraEvidence {
   view_verification_source_url?: string | null;
   line_of_sight_verified?: boolean;
   image_url: string;
-  vehicle_count: number;
-  traffic_density_score: number; // 0.0 to 1.0
-  flood_ratio: number; // 0.0 to 1.0
+  has_image?: boolean;
+  image_access_status?: ImageAccessStatus;
+  evidence_eligibility?: EvidenceEligibility;
+  captured_at?: string | null;
+  retrieved_at?: string | null;
+  analyzed_at?: string | null;
+  source_updated_at?: string | null;
+  source_url?: string | null;
+  image_status?: string | null;
+  image_status_reason?: string | null;
+  model_status?: string | null;
+  vehicle_model_name?: string | null;
+  vehicle_model_version?: string | null;
+  vehicle_model_sha256?: string | null;
+  vehicle_model_provenance?: string | null;
+  vehicle_model_validation?: string | null;
+  flood_model_status?: string | null;
+  vehicle_count?: number | null;
+  traffic_density_score?: number | null; // 0.0 to 1.0, null when unanalyzed
+  flood_ratio?: number | null; // 0.0 to 1.0, null when unanalyzed
   risk_level: RiskLevel;
   source_status: DataSourceStatus;
   updated_at: string;
+}
+
+export interface CameraImageMetadata {
+  cam_id: string;
+  code?: string | null;
+  name: string;
+  district?: string | null;
+  lat: number;
+  lng: number;
+  has_image: boolean;
+  image_url?: string | null;
+  source_url?: string | null;
+  image_access_status: ImageAccessStatus;
+  evidence_eligibility: EvidenceEligibility;
+  image_status_reason: string;
+  captured_at?: string | null;
+  retrieved_at?: string | null;
+  analyzed_at?: string | null;
+  source_updated_at?: string | null;
+  model_status?: string | null;
+  vehicle_count?: number | null;
+  traffic_density_score?: number | null;
+  flood_ratio?: number | null;
+  etag?: string | null;
+  content_length?: number | null;
+  mime_type?: string | null;
 }
 
 export interface WeatherTideSignal {
@@ -64,6 +119,10 @@ export interface RouteSegmentRisk {
   geojson_path?: { type: "LineString"; coordinates: number[][] } | null;
   street_name?: string | null;
   length_meters: number;
+  maneuver_type?: string | null;
+  maneuver_modifier?: string | null;
+  maneuver_location?: number[] | null;
+  maneuver_exit?: number | null;
   risk_score: number | null;
   risk_level: RiskLevel;
   historical_flood_prone?: boolean | null;
@@ -120,3 +179,37 @@ export interface WebSocketAlertMessage {
   observed_at: string;
   expiry?: string | null;
 }
+
+export interface PlaceResult {
+  id: string;
+  name: string;
+  display_name: string;
+  lat: number;
+  lng: number;
+  osm_type?: string | null;
+  osm_id?: number | null;
+  type?: string | null;
+  district?: string | null;
+  city?: string | null;
+  provenance: string;
+}
+
+export interface PlaceSearchResponse {
+  query: string;
+  results: PlaceResult[];
+  provider: string;
+  count: number;
+}
+
+export type NavigationUXState =
+  | "IDLE"
+  | "SEARCHING_PLACE"
+  | "LOCATION_REQUESTING"
+  | "READY_TO_ROUTE"
+  | "ROUTING"
+  | "ROUTE_FOUND"
+  | "NO_ROUTE"
+  | "PROVIDER_DOWN"
+  | "NAVIGATING";
+
+export type MapSelectionMode = "ORIGIN" | "DESTINATION" | "NONE";

@@ -97,3 +97,9 @@ async def test_live_api_preserves_osrm_route(points):
     assert body["total_distance_km"] == round(osrm_route["distance"] / 1000, 3)
     assert body["estimated_time_mins"] == round(osrm_route["duration"] / 60, 2)
     assert body["overall_risk"] == "UNKNOWN"
+    first_step = osrm_route["legs"][0]["steps"][0]
+    first_segment = body["segments"][0]
+    assert first_segment["maneuver_type"] == first_step["maneuver"]["type"]
+    assert first_segment["maneuver_modifier"] == first_step["maneuver"].get("modifier")
+    assert first_segment["maneuver_location"] == first_step["maneuver"]["location"]
+    assert first_segment["length_meters"] == first_step["distance"]

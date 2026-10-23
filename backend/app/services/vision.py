@@ -14,6 +14,7 @@ Zero-Mock Implementation:
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -23,10 +24,13 @@ import cv2
 import numpy as np
 from redis.asyncio import Redis
 
+from backend.app.core.config import settings
 from backend.app.db.session import get_redis_client
 from backend.app.schemas.contracts import (
     CameraEvidence,
     DataSourceStatus,
+    EvidenceEligibility,
+    ImageAccessStatus,
     RiskLevel,
 )
 
@@ -60,6 +64,52 @@ MODERATE_TRAFFIC_DENSITY = 0.50
 DEFAULT_YOLO_PATH = "data/models/yolov5n.onnx"
 DEFAULT_FLOOD_UNET_PATH = "data/models/flood_unet.onnx"
 DEFAULT_MANIFEST_PATH = "data/models/model_manifest.json"
+
+
+def verified_model_manifest_entry(model_key: str, model_path: str) -> Optional[Dict[str, Any]]:
+    """Reject missing, unlisted, modified, or unvalidated model weights before ONNX load."""
+    try:
+        with open(DEFAULT_MANIFEST_PATH, encoding="utf-8") as manifest_file:
+            entry = json.load(manifest_file)["models"][model_key]
+        expected_hash = entry.get("sha256")
+        if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+            return None
+        if os.path.realpath(model_path) != os.path.realpath(entry["file_path"]):
+            return None
+        if os.path.getsize(model_path) != entry.get("size_bytes"):
+            return None
+        if model_key == "flood_segmenter":
+            metrics = entry.get("benchmark_metrics") or {}
+            if (entry.get("provenance_status") != "VALIDATED_HCMC_ROAD_FLOOD"
+                    or not metrics.get("validation_dataset")
+                    or metrics.get("iou") is None or metrics["iou"] < 0.70
+                    or metrics.get("f1_score") is None or metrics["f1_score"] < 0.80
+                    or not metrics.get("rain_night_reflection_reviewed")):
+                return None
+        hasher = hashlib.sha256()
+        with open(model_path, "rb") as weights:
+            for chunk in iter(lambda: weights.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        if not hmac.compare_digest(hasher.hexdigest(), expected_hash):
+            logger.error("Model SHA-256 mismatch for %s", model_key)
+            return None
+        return entry
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        logger.warning("Model manifest validation failed for %s: %s", model_key, exc)
+        return None
+
+
+def _validate_onnx_schema(session: Any, entry: Dict[str, Any]) -> bool:
+    try:
+        inp, out = session.get_inputs()[0], session.get_outputs()[0]
+        expected_in, expected_out = entry["expected_input"], entry["expected_output"]
+        onnx_dtype = {"float32": "float", "float16": "float16"}
+        return (inp.name == expected_in["name"] and inp.shape == expected_in["shape"]
+                and inp.type == f"tensor({onnx_dtype[expected_in['dtype']]})"
+                and out.name == expected_out["name"] and out.shape == expected_out["shape"]
+                and out.type == f"tensor({onnx_dtype[expected_out['dtype']]})")
+    except (IndexError, KeyError, TypeError):
+        return False
 
 
 @dataclass
@@ -203,15 +253,22 @@ class VehicleDetector:
         self.model_sha256 = None
         self.model_status = "MODEL_UNAVAILABLE"
         self.version = "v7.0"
+        self.provenance_status = "MODEL_UNAVAILABLE"
+        self.validation_status = "EXPERIMENTAL_HCMC"
 
         if model_path and os.path.exists(model_path):
             try:
                 import onnxruntime as ort
-
-                with open(model_path, "rb") as f:
-                    self.model_sha256 = hashlib.sha256(f.read()).hexdigest()
-
+                entry = verified_model_manifest_entry("vehicle_detector", model_path)
+                if entry is None:
+                    raise ValueError("weights do not match the approved SHA-256 manifest")
+                self.model_sha256 = entry["sha256"]
                 self.session = ort.InferenceSession(model_path)
+                if not _validate_onnx_schema(self.session, entry):
+                    raise ValueError("ONNX input/output schema differs from manifest")
+                self.version = entry["version"]
+                self.provenance_status = entry["provenance_status"]
+                self.validation_status = entry.get("deployment_validation", "EXPERIMENTAL_HCMC")
                 self.model_status = "VERIFIED_ONNX_INFERENCE"
                 logger.info(
                     "Loaded verified ONNX Vehicle Detector from %s (SHA-256: %s...)",
@@ -268,14 +325,19 @@ class VehicleDetector:
         img_letter, r, (dw, dh) = letterbox(orig_img, (640, 640))
         # BGR to RGB, HWC to CHW
         blob = img_letter[:, :, ::-1].transpose(2, 0, 1)
-        # Normalize and cast to float16
-        blob = np.ascontiguousarray(blob, dtype=np.float16) / 255.0
+        input_type = self.session.get_inputs()[0].type
+        dtype = np.float16 if input_type == "tensor(float16)" else np.float32 if input_type == "tensor(float)" else None
+        if dtype is None:
+            raise ValueError(f"Unsupported ONNX input type: {input_type}")
+        blob = np.ascontiguousarray(blob, dtype=dtype) / dtype(255.0)
         blob = blob[None, ...]  # Shape: [1, 3, 640, 640]
 
         # 2. Forward pass via ONNX Runtime
         input_name = self.session.get_inputs()[0].name
         output_name = self.session.get_outputs()[0].name
         out = self.session.run([output_name], {input_name: blob})[0]  # [1, 25200, 85]
+        if out.shape != (1, 25200, 85):
+            raise ValueError(f"Expected YOLOv5 [1,25200,85], got {out.shape}; YOLO26 requires its own decoder")
 
         detections = out[0]  # [25200, 85]
         boxes: List[List[int]] = []
@@ -438,15 +500,21 @@ class FloodSegmenter:
         self.session = None
         self.model_sha256 = None
         self.model_status = "MODEL_UNAVAILABLE"
+        self.version = None
+        self.provenance_status = "MODEL_UNAVAILABLE"
 
         if model_path and os.path.exists(model_path):
             try:
                 import onnxruntime as ort
-
-                with open(model_path, "rb") as f:
-                    self.model_sha256 = hashlib.sha256(f.read()).hexdigest()
-
+                entry = verified_model_manifest_entry("flood_segmenter", model_path)
+                if entry is None:
+                    raise ValueError("flood weights lack SHA-256 or HCMC validation metrics")
+                self.model_sha256 = entry["sha256"]
                 self.session = ort.InferenceSession(model_path)
+                if not _validate_onnx_schema(self.session, entry):
+                    raise ValueError("Flood ONNX schema differs from manifest")
+                self.version = entry["version"]
+                self.provenance_status = entry["provenance_status"]
                 self.model_status = "VERIFIED_ONNX_INFERENCE"
                 logger.info("Loaded verified ONNX Flood Segmentation model from %s", model_path)
             except Exception as exc:
@@ -486,7 +554,11 @@ class FloodSegmenter:
         # Resize to model expected input (e.g. 256x256)
         in_tensor = cv2.resize(roi_img, (256, 256), interpolation=cv2.INTER_LINEAR)
         in_tensor = in_tensor[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
-        in_tensor = np.ascontiguousarray(in_tensor, dtype=np.float32) / 255.0
+        input_type = self.session.get_inputs()[0].type
+        dtype = np.float16 if input_type == "tensor(float16)" else np.float32 if input_type == "tensor(float)" else None
+        if dtype is None:
+            raise ValueError(f"Unsupported flood ONNX input type: {input_type}")
+        in_tensor = np.ascontiguousarray(in_tensor, dtype=dtype) / dtype(255.0)
         in_tensor = in_tensor[None, ...]
 
         input_name = self.session.get_inputs()[0].name
@@ -597,12 +669,22 @@ def determine_camera_risk_level(
     if vehicle_result is None or not vehicle_result.is_available:
         return RiskLevel.UNKNOWN
 
-    f_ratio = (
-        flood_result.flood_ratio
-        if flood_result is not None and flood_result.is_available and flood_result.flood_ratio is not None
-        else 0.0
-    )
     density = vehicle_result.traffic_density_score
+    has_flood_model = (
+        flood_result is not None
+        and flood_result.is_available
+        and flood_result.flood_ratio is not None
+    )
+
+    if not has_flood_model:
+        # Without verified flood segmentation, road cannot be claimed SAFE
+        if density >= CRITICAL_TRAFFIC_DENSITY:
+            return RiskLevel.CRITICAL
+        elif density >= MODERATE_TRAFFIC_DENSITY:
+            return RiskLevel.MODERATE
+        return RiskLevel.UNKNOWN
+
+    f_ratio = flood_result.flood_ratio
 
     # Check critical condition
     if f_ratio >= CRITICAL_FLOOD_RATIO or density >= CRITICAL_TRAFFIC_DENSITY:
@@ -729,7 +811,37 @@ class CameraVisionPipeline:
         if os.path.exists(overlay_path) and overlay_path != analyzed_path:
             shutil.copyfile(overlay_path, analyzed_path)
 
-        flood_ratio = flood_result.flood_ratio if flood_result.flood_ratio is not None else 0.0
+        flood_ratio = flood_result.flood_ratio  # Zero-Mock: preserve None when unanalyzed/unavailable
+
+        # Determine freshness against CAMERA_IMAGE_TTL_SECONDS
+        now = datetime.now(timezone.utc)
+        file_mtime = os.path.getmtime(image_path) if os.path.exists(image_path) else 0.0
+        retrieved_at = datetime.fromtimestamp(file_mtime, timezone.utc) if file_mtime else None
+        captured_at = cam_meta.get("captured_at")
+        if isinstance(captured_at, str):
+            try:
+                captured_at = datetime.fromisoformat(captured_at)
+            except ValueError:
+                captured_at = None
+        capture_fresh = (
+            isinstance(captured_at, datetime) and captured_at.tzinfo is not None
+            and 0 <= (now - captured_at).total_seconds() <= settings.CAMERA_IMAGE_TTL_SECONDS
+        )
+        is_fresh = capture_fresh and retrieved_at is not None and 0 <= (now - retrieved_at).total_seconds() <= settings.CAMERA_IMAGE_TTL_SECONDS
+        source_st = DataSourceStatus.LIVE if is_fresh else DataSourceStatus.STALE
+
+        # Routing eligibility gate
+        los_ok = bool(cam_meta.get("line_of_sight_verified", False))
+        way_ok = cam_meta.get("observed_osm_way_id") is not None
+        eligibility = (
+            EvidenceEligibility.ROUTING_ELIGIBLE
+            if (los_ok and way_ok and is_fresh and settings.CAMERA_ROUTING_EVIDENCE_PERMITTED
+                and self.vehicle_detector.validation_status == "VALIDATED_HCMC"
+                and self.flood_segmenter.provenance_status == "VALIDATED_HCMC_ROAD_FLOOD")
+            else EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
+        )
+        if eligibility != EvidenceEligibility.ROUTING_ELIGIBLE:
+            risk_level = RiskLevel.UNKNOWN
 
         return CameraEvidence(
             cam_id=cam_id,
@@ -744,14 +856,29 @@ class CameraVisionPipeline:
             observed_osm_way_id=cam_meta.get("observed_osm_way_id"),
             observed_edge_index=cam_meta.get("observed_edge_index"),
             view_verification_source_url=cam_meta.get("view_verification_source_url"),
-            line_of_sight_verified=bool(cam_meta.get("line_of_sight_verified", False)),
+            line_of_sight_verified=los_ok,
             image_url=f"/api/v1/cameras/{cam_id}/image",
-            vehicle_count=veh_result.vehicle_count,
-            traffic_density_score=veh_result.traffic_density_score,
+            has_image=True,
+            image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
+            evidence_eligibility=eligibility,
+            image_status="VALID_IMAGE_CACHED",
+            image_status_reason="VALID_IMAGE_CACHED",
+            model_status="INFERENCE_COMPLETED" if veh_result.model_status == "VERIFIED_ONNX_INFERENCE" else veh_result.model_status,
+            vehicle_model_name=veh_result.model_name,
+            vehicle_model_version=self.vehicle_detector.version,
+            vehicle_model_sha256=self.vehicle_detector.model_sha256,
+            vehicle_model_provenance=self.vehicle_detector.provenance_status,
+            vehicle_model_validation=self.vehicle_detector.validation_status,
+            flood_model_status=flood_result.model_status,
+            captured_at=captured_at if isinstance(captured_at, datetime) and captured_at.tzinfo else None,
+            retrieved_at=retrieved_at,
+            analyzed_at=now,
+            vehicle_count=veh_result.vehicle_count if veh_result.is_available else None,
+            traffic_density_score=veh_result.traffic_density_score if veh_result.is_available else None,
             flood_ratio=flood_ratio,
             risk_level=risk_level,
-            source_status=DataSourceStatus.LIVE,
-            updated_at=datetime.now(timezone.utc),
+            source_status=source_st,
+            updated_at=now,
         )
 
 
@@ -772,9 +899,9 @@ async def save_camera_evidence_to_redis(
             "cam_id": str(evidence.cam_id),
             "code": str(evidence.code or ""),
             "risk_level": str(evidence.risk_level.value if hasattr(evidence.risk_level, "value") else evidence.risk_level),
-            "flood_ratio": str(evidence.flood_ratio if evidence.flood_ratio is not None else 0.0),
-            "traffic_density_score": str(evidence.traffic_density_score if evidence.traffic_density_score is not None else 0.0),
-            "vehicle_count": str(evidence.vehicle_count if evidence.vehicle_count is not None else 0),
+            "flood_ratio": str(evidence.flood_ratio) if evidence.flood_ratio is not None else "",
+            "traffic_density_score": str(evidence.traffic_density_score) if evidence.traffic_density_score is not None else "",
+            "vehicle_count": str(evidence.vehicle_count) if evidence.vehicle_count is not None else "",
             "updated_at": evidence.updated_at.isoformat() if evidence.updated_at else datetime.now(timezone.utc).isoformat(),
         }
         await redis_client.hset(hash_key, mapping=state_mapping)
@@ -784,9 +911,9 @@ async def save_camera_evidence_to_redis(
         stream_payload = {
             "cam_id": str(evidence.cam_id),
             "risk_level": str(evidence.risk_level.value if hasattr(evidence.risk_level, "value") else evidence.risk_level),
-            "flood_ratio": str(evidence.flood_ratio if evidence.flood_ratio is not None else 0.0),
-            "traffic_density_score": str(evidence.traffic_density_score if evidence.traffic_density_score is not None else 0.0),
-            "vehicle_count": str(evidence.vehicle_count if evidence.vehicle_count is not None else 0),
+            "flood_ratio": str(evidence.flood_ratio) if evidence.flood_ratio is not None else "",
+            "traffic_density_score": str(evidence.traffic_density_score) if evidence.traffic_density_score is not None else "",
+            "vehicle_count": str(evidence.vehicle_count) if evidence.vehicle_count is not None else "",
         }
         await redis_client.xadd("stream:camera_updates", stream_payload)
 

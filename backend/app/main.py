@@ -17,6 +17,8 @@ from fastapi import (
     FastAPI,
     HTTPException,
     Query,
+    Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -41,19 +43,30 @@ from backend.app.db.session import (
 )
 from backend.app.schemas.contracts import (
     CameraEvidence,
+    CameraImageMetadata,
     Coordinates,
     DataSourceStatus,
+    EvidenceEligibility,
+    ImageAccessStatus,
+    PlaceResult,
+    PlaceSearchResponse,
     RiskLevel,
     RouteSearchRequest,
     SafeRouteResponse,
     WeatherTideSignal,
     WebSocketAlertMessage,
 )
+from backend.app.services.geocoding import reverse_geocode, search_places
 from backend.app.services.image_validator import validate_camera_image_bytes
 from backend.app.services.mcp_explanation import generate_route_explanation
 from backend.app.services.routing import find_safe_route, RoutingError
-from backend.app.services.scraper import scrape_active_cameras
-from backend.app.services.vision import process_all_cameras_vision
+from backend.app.services.scraper import (
+    evict_stale_disk_images,
+    is_valid_cam_id,
+    portal_circuit_breaker,
+    scrape_active_cameras,
+)
+from backend.app.services.vision import process_all_cameras_vision, verified_model_manifest_entry, DEFAULT_YOLO_PATH, DEFAULT_FLOOD_UNET_PATH
 from backend.app.services.weather_tide import (
     get_cached_weather_tide,
     get_combined_weather_tide,
@@ -114,12 +127,29 @@ async def background_camera_worker_loop(stop_event: asyncio.Event) -> None:
     logger.info("Starting background camera worker daemon...")
     while not stop_event.is_set():
         try:
-            # 1. Camera Ingestion & Vision Processing (if permitted)
-            if settings.CAMERA_INGESTION_PERMITTED:
+            # 0. Evict stale snapshots past retention threshold
+            try:
+                evicted = evict_stale_disk_images("storage/cams", max_hours=settings.CAMERA_DISK_EVICTION_MAX_HOURS)
+                if evicted > 0:
+                    logger.info("Evicted %d stale camera snapshots from disk cache.", evicted)
+            except Exception as e:
+                logger.debug("Disk eviction skipped: %s", e)
+
+            # 1. Camera Ingestion & Vision Processing (prioritized batching)
+            can_scrape = (settings.CAMERA_INGESTION_PERMITTED or settings.CAMERA_ALLOW_VIEW_ONLY)
+            if can_scrape and portal_circuit_breaker.can_request():
                 try:
                     async with AsyncSessionLocal() as session:
                         result = await session.execute(
-                            text("SELECT cam_id, code, name, district, ST_Y(geom) as lat, ST_X(geom) as lng FROM traffic_cameras WHERE geom IS NOT NULL LIMIT 20")
+                            text("""
+                                SELECT cam_id, code, name, district, ST_Y(geom) as lat, ST_X(geom) as lng 
+                                FROM traffic_cameras 
+                                WHERE geom IS NOT NULL 
+                                ORDER BY 
+                                    CASE WHEN snapshot_cam_status = 'UP' THEN 0 ELSE 1 END,
+                                    cam_id ASC
+                                LIMIT 8
+                            """)
                         )
                         cams = [
                             {"cam_id": r.cam_id, "code": r.code, "name": r.name, "district": r.district, "lat": r.lat, "lng": r.lng}
@@ -132,8 +162,10 @@ async def background_camera_worker_loop(stop_event: asyncio.Event) -> None:
                             await process_all_cameras_vision(valid_scraped)
                 except Exception as exc:
                     logger.warning("Camera ingestion/vision batch error: %s", exc)
+            elif not can_scrape:
+                logger.debug("Camera ingestion disabled: CAMERA_INGESTION_PERMITTED=false and CAMERA_ALLOW_VIEW_ONLY=false.")
             else:
-                logger.debug("Camera ingestion disabled: CAMERA_INGESTION_PERMITTED=false (PERMISSION_UNVERIFIED).")
+                logger.debug("Camera ingestion temporarily paused: portal circuit breaker is OPEN.")
 
             # 2. Sync weather and tide signal
             redis = get_redis_client()
@@ -164,6 +196,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manages application startup and graceful shutdown."""
     logger.info("Initializing SafePathAI Backend Infrastructure...")
     await init_db()
+    app.state.osrm_client = httpx.AsyncClient(timeout=8.0, limits=httpx.Limits(max_connections=100, max_keepalive_connections=20))
 
     stop_event = asyncio.Event()
     worker_task = asyncio.create_task(background_camera_worker_loop(stop_event))
@@ -178,6 +211,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except asyncio.CancelledError:
         pass
 
+    await app.state.osrm_client.aclose()
     await close_db()
     logger.info("SafePathAI Backend Shutdown complete.")
 
@@ -204,9 +238,86 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    request.state.request_id = str(uuid.uuid4())
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
+
+
 # ==============================================================================
 # REST Endpoints
 # ==============================================================================
+@app.get("/api/v1/models/status", tags=["Surveillance"])
+async def model_status() -> Dict[str, Any]:
+    """Expose weight provenance and deployment validation without claiming local accuracy."""
+    vehicle = verified_model_manifest_entry("vehicle_detector", DEFAULT_YOLO_PATH)
+    flood = verified_model_manifest_entry("flood_segmenter", DEFAULT_FLOOD_UNET_PATH)
+    return {
+        "vehicle_detector": {
+            "status": "EXPERIMENTAL" if vehicle else "MODEL_UNAVAILABLE",
+            "model_name": vehicle.get("model_name") if vehicle else None,
+            "version": vehicle.get("version") if vehicle else None,
+            "sha256": vehicle.get("sha256") if vehicle else None,
+            "source_url": vehicle.get("source_url") if vehicle else None,
+            "provenance_status": vehicle.get("provenance_status") if vehicle else None,
+            "deployment_validation": vehicle.get("deployment_validation") if vehicle else None,
+        },
+        "flood_segmenter": {
+            "status": "VALIDATED" if flood else "MODEL_UNAVAILABLE",
+            "model_name": flood.get("model_name") if flood else None,
+            "version": flood.get("version") if flood else None,
+            "sha256": flood.get("sha256") if flood else None,
+            "source_url": flood.get("source_url") if flood else None,
+        },
+    }
+
+
+@app.get(
+    "/api/v1/places/search",
+    response_model=PlaceSearchResponse,
+    summary="Search places, addresses, and POIs in TP.HCM",
+    tags=["Geocoding"],
+)
+async def search_hcm_places(
+    q: str = Query(..., min_length=1, description="Address, street name, POI, or coordinates"),
+    limit: int = Query(6, ge=1, le=15, description="Max results to return"),
+    session: AsyncSession = Depends(get_db),
+) -> PlaceSearchResponse:
+    """
+    Searches for real locations in TP. Hồ Chí Minh using Photon (Komoot OSM)
+    with local PostGIS road segments fallback and coordinate parsing.
+    Zero-Mock: Returns genuine geocoded results or empty list; never fabricates fake locations.
+    """
+    redis = get_redis_client()
+    try:
+        return await search_places(q=q, limit=limit, session=session, redis=redis)
+    finally:
+        await redis.aclose()
+
+
+@app.get(
+    "/api/v1/places/reverse",
+    response_model=PlaceResult,
+    summary="Reverse geocode coordinates to an address or nearest road",
+    tags=["Geocoding"],
+)
+async def reverse_hcm_place(
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude"),
+    lng: float = Query(..., ge=-180.0, le=180.0, description="Longitude"),
+    session: AsyncSession = Depends(get_db),
+) -> PlaceResult:
+    """
+    Reverse geocodes a WGS84 point into an address or street name.
+    """
+    redis = get_redis_client()
+    try:
+        return await reverse_geocode(lat=lat, lng=lng, session=session, redis=redis)
+    finally:
+        await redis.aclose()
+
+
 @app.get(
     "/api/v1/health",
     summary="System Health & Infrastructure Status",
@@ -302,6 +413,9 @@ async def get_weather_tide() -> WeatherTideSignal:
 )
 async def list_cameras(
     district: Optional[str] = Query(None, description="Optional filter by district name"),
+    bbox: Optional[str] = Query(None, description="west,south,east,north WGS84 map bounds"),
+    limit: int = Query(1000, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     session: AsyncSession = Depends(get_db),
 ) -> List[CameraEvidence]:
     """
@@ -330,7 +444,17 @@ async def list_cameras(
     if district:
         query_str += " AND c.district = :district"
         params["district"] = district
-    query_str += " ORDER BY c.cam_id ASC"
+    if bbox:
+        try:
+            west, south, east, north = (float(value) for value in bbox.split(","))
+            if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
+                raise ValueError("invalid bounds")
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="bbox must be west,south,east,north in WGS84")
+        query_str += " AND c.geom && ST_MakeEnvelope(:west, :south, :east, :north, 4326)"
+        params.update({"west": west, "south": south, "east": east, "north": north})
+    query_str += " ORDER BY c.cam_id ASC LIMIT :limit OFFSET :offset"
+    params.update({"limit": limit, "offset": offset})
 
     stmt = text(query_str)
     result = await session.execute(stmt, params)
@@ -341,11 +465,14 @@ async def list_cameras(
     now = datetime.now(timezone.utc)
 
     try:
-        for row in rows:
+        try:
+            cached_values = await redis.mget([f"camera_evidence:{row.cam_id}" for row in rows]) if rows else []
+        except Exception:
+            cached_values = [None] * len(rows)
+        for row, cached_raw in zip(rows, cached_values):
             cam_id = row.cam_id
             redis_data = None
             try:
-                cached_raw = await redis.get(f"camera_evidence:{cam_id}")
                 if cached_raw:
                     redis_data = json.loads(cached_raw)
             except Exception:
@@ -356,6 +483,10 @@ async def list_cameras(
 
             if redis_data:
                 evidence = CameraEvidence(**redis_data)
+                # Requirement 7: Unverified view direction/LOS never decides risk; remains UNKNOWN
+                if not row.line_of_sight_verified or not settings.CAMERA_ROUTING_EVIDENCE_PERMITTED:
+                    evidence.risk_level = RiskLevel.UNKNOWN
+                    evidence.evidence_eligibility = EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
             else:
                 spatial_status = (
                     "OBSERVED_SEGMENT_VERIFIED"
@@ -363,6 +494,11 @@ async def list_cameras(
                     else "SPATIALLY_NEAR" if row.osm_way_id is not None
                     else "UNVERIFIED"
                 )
+                is_fresh = False
+                if has_local_file:
+                    file_age = now.timestamp() - os.path.getmtime(local_image_path)
+                    is_fresh = (file_age <= settings.CAMERA_IMAGE_TTL_SECONDS)
+
                 evidence = CameraEvidence(
                     cam_id=cam_id,
                     code=row.code,
@@ -378,11 +514,17 @@ async def list_cameras(
                     view_verification_source_url=row.view_verification_source_url,
                     line_of_sight_verified=bool(row.line_of_sight_verified),
                     image_url=f"/api/v1/cameras/{cam_id}/image" if has_local_file else "",
-                    vehicle_count=0,
-                    traffic_density_score=0.0,
-                    flood_ratio=0.0,
+                    has_image=has_local_file,
+                    image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC if has_local_file else ImageAccessStatus.UNAVAILABLE,
+                    evidence_eligibility=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+                    image_status="VALID_IMAGE_CACHED" if has_local_file else "NO_IMAGE",
+                    image_status_reason="VALID_IMAGE_CACHED" if has_local_file else "IMAGE_UNAVAILABLE",
+                    model_status="NOT_ANALYZED",
+                    vehicle_count=None,
+                    traffic_density_score=None,
+                    flood_ratio=None,
                     risk_level=RiskLevel.UNKNOWN,
-                    source_status=DataSourceStatus.LIVE if has_local_file else DataSourceStatus.STALE,
+                    source_status=DataSourceStatus.LIVE if is_fresh else DataSourceStatus.STALE,
                     updated_at=now,
                 )
             evidence_list.append(evidence)
@@ -399,17 +541,19 @@ async def list_cameras(
 )
 async def get_camera_image(
     cam_id: str,
+    request: Request,
     session: AsyncSession = Depends(get_db),
 ):
     """
     Returns verified image snapshot for the given camera ID.
     Zero-Mock: Returns HTTP 404/503 if no valid verified image exists.
     Never returns sample or simulated mock images.
+    Enforces path traversal protection and returns ETag / Cache-Control headers.
     """
-    if not cam_id or len(cam_id) > 64:
+    if not is_valid_cam_id(cam_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "INVALID_CAMERA_ID", "message": "Malformed camera identifier."},
+            detail={"code": "INVALID_CAMERA_ID", "message": "Malformed or unsafe camera identifier."},
         )
 
     # 1. Verify existence of camera in database
@@ -455,8 +599,137 @@ async def get_camera_image(
             detail={"code": "IMAGE_READ_ERROR", "message": str(exc)},
         )
 
+    etag = f'"{val.md5_hash}"'
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match.strip() == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
+
+    now = datetime.now(timezone.utc)
+    file_age = now.timestamp() - os.path.getmtime(local_path)
+    is_fresh = file_age <= settings.CAMERA_IMAGE_TTL_SECONDS
+
     media_type = "image/jpeg" if val.format == "JPEG" else f"image/{val.format.lower() if val.format else 'jpeg'}"
-    return FileResponse(local_path, media_type=media_type)
+    headers = {
+        "ETag": etag,
+        "Cache-Control": "public, max-age=60" if is_fresh else "no-cache",
+        "X-Image-Access-Status": ImageAccessStatus.VIEWABLE_PUBLIC.value,
+        "X-Evidence-Eligibility": EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING.value,
+        "X-Captured-At": val.captured_at.isoformat() if val.captured_at else "UNKNOWN",
+        "X-Retrieved-At": val.retrieved_at.isoformat(),
+    }
+    return FileResponse(local_path, media_type=media_type, headers=headers)
+
+
+@app.get(
+    "/api/v1/cameras/{cam_id}/metadata",
+    response_model=CameraImageMetadata,
+    summary="Get camera snapshot technical metadata, provenance, and eligibility",
+    tags=["Surveillance"],
+)
+async def get_camera_metadata(
+    cam_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> CameraImageMetadata:
+    """
+    Returns technical metadata for camera snapshot: ETag, access status, reason codes,
+    provenance, and eligibility for routing without transferring large image bytes.
+    """
+    if not is_valid_cam_id(cam_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "INVALID_CAMERA_ID", "message": "Malformed or unsafe camera identifier."},
+        )
+
+    stmt = text("""
+        SELECT c.cam_id, c.code, c.name, c.district, ST_Y(c.geom) AS lat, ST_X(c.geom) AS lng,
+               c.coordinate_source_url, c.source_uri, c.observed_osm_way_id, c.line_of_sight_verified
+        FROM traffic_cameras c
+        WHERE c.cam_id = :cam_id
+    """)
+    res = await session.execute(stmt, {"cam_id": cam_id})
+    row = res.fetchone()
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CAMERA_NOT_FOUND", "message": f"Camera '{cam_id}' is not registered."},
+        )
+
+    local_path = os.path.join("storage", "cams", f"{cam_id}.jpg")
+    has_local = os.path.exists(local_path)
+    etag = None
+    content_length = None
+    mime_type = None
+    captured_at = None
+    retrieved_at = None
+    image_status_reason = "IMAGE_UNAVAILABLE"
+    access_status = ImageAccessStatus.UNAVAILABLE
+    eligibility = EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
+
+    redis = get_redis_client()
+    redis_data = None
+    try:
+        raw = await redis.get(f"camera_evidence:{cam_id}")
+        if raw:
+            redis_data = json.loads(raw)
+    except Exception:
+        pass
+    finally:
+        await redis.aclose()
+
+    if has_local:
+        try:
+            with open(local_path, "rb") as f:
+                content = f.read()
+            val = validate_camera_image_bytes(content)
+            if val.is_valid:
+                has_local = True
+                etag = f'"{val.md5_hash}"'
+                content_length = len(content)
+                mime_type = "image/jpeg" if val.format == "JPEG" else f"image/{val.format.lower() if val.format else 'jpeg'}"
+                captured_at = val.captured_at
+                retrieved_at = val.retrieved_at
+                image_status_reason = "VALID_IMAGE_CACHED"
+                access_status = ImageAccessStatus.VIEWABLE_PUBLIC
+            else:
+                has_local = False
+                image_status_reason = val.status.value
+        except Exception:
+            has_local = False
+            image_status_reason = "IMAGE_READ_ERROR"
+
+    if not has_local and not portal_circuit_breaker.can_request():
+        access_status = ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED
+        image_status_reason = "EXTERNAL_ACCESS_RESTRICTED"
+
+    source_url = row.source_uri or (
+        f"{settings.HCMC_CAMERA_BASE_URL}?id={cam_id}&bg=black&w=300&h=230"
+    )
+
+    return CameraImageMetadata(
+        cam_id=row.cam_id,
+        code=row.code,
+        name=row.name,
+        district=row.district,
+        lat=row.lat,
+        lng=row.lng,
+        has_image=has_local,
+        image_url=f"/api/v1/cameras/{cam_id}/image" if has_local else None,
+        source_url=source_url,
+        image_access_status=access_status,
+        evidence_eligibility=eligibility,
+        image_status_reason=image_status_reason,
+        captured_at=captured_at,
+        retrieved_at=retrieved_at,
+        analyzed_at=datetime.fromisoformat(redis_data["analyzed_at"]) if (redis_data and redis_data.get("analyzed_at")) else None,
+        source_updated_at=None,
+        model_status=redis_data.get("model_status", "NOT_ANALYZED") if redis_data else "NOT_ANALYZED",
+        vehicle_count=redis_data.get("vehicle_count") if redis_data else None,
+        traffic_density_score=redis_data.get("traffic_density_score") if redis_data else None,
+        flood_ratio=redis_data.get("flood_ratio") if redis_data else None,
+        etag=etag,
+        content_length=content_length,
+        mime_type=mime_type,
+    )
 
 
 @app.post(
@@ -467,6 +740,7 @@ async def get_camera_image(
 )
 async def search_safe_route(
     request: RouteSearchRequest,
+    http_request: Request,
     session: AsyncSession = Depends(get_db),
 ) -> SafeRouteResponse:
     """
@@ -484,6 +758,8 @@ async def search_safe_route(
             dest_lng=request.destination.lng,
             db_session=session,
             redis_client=redis,
+            osrm_client=getattr(http_request.app.state, "osrm_client", None),
+            request_id=http_request.state.request_id,
             )
         except RoutingError as exc:
             raise HTTPException(status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}) from exc

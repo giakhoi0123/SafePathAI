@@ -36,7 +36,8 @@
         "latency_ms": 6.4,
         "validation_dataset": "COCO val2017 (5,000 images)"
       },
-      "provenance_status": "VERIFIED_OFFICIAL_PRETRAINED"
+      "provenance_status": "VERIFIED_OFFICIAL_PRETRAINED",
+      "deployment_validation": "EXPERIMENTAL_HCMC"
     },
     "flood_segmenter": {
       "model_name": "flood_unet.onnx",

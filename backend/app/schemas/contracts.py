@@ -32,9 +32,32 @@ class DataSourceStatus(str, Enum):
     SIMULATED = "SIMULATED"
 
 
+class ImageAccessStatus(str, Enum):
+    """
+    Reflects the actual accessibility and viewing status of a camera image snapshot.
+    """
+    VIEWABLE_PUBLIC = "VIEWABLE_PUBLIC"
+    VIEWABLE_AUTHORIZED = "VIEWABLE_AUTHORIZED"
+    EXTERNAL_ACCESS_RESTRICTED = "EXTERNAL_ACCESS_RESTRICTED"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class EvidenceEligibility(str, Enum):
+    """
+    Verification gate for camera evidence in route risk scoring:
+    - ROUTING_ELIGIBLE: ONLY when source permission, verified capture timestamp,
+      camera positioning/FOV/LOS, and verified CV model results are all confirmed.
+    - NOT_VERIFIED_FOR_ROUTING: Default for unverified, view-only, or candidate cameras.
+    """
+    ROUTING_ELIGIBLE = "ROUTING_ELIGIBLE"
+    NOT_VERIFIED_FOR_ROUTING = "NOT_VERIFIED_FOR_ROUTING"
+
+
 class CameraEvidence(BaseModel):
     """
     Detailed evidence payload collected from a single traffic camera.
+    Zero-Mock: All metric fields (vehicle_count, traffic_density_score, flood_ratio)
+    are None when unobserved or unanalyzed. None != 0.
     """
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
@@ -51,17 +74,73 @@ class CameraEvidence(BaseModel):
     observed_edge_index: Optional[int] = Field(default=None, description="Verified local edge index within the OSM Way")
     view_verification_source_url: Optional[str] = Field(default=None, description="Evidence for view direction and observed road")
     line_of_sight_verified: bool = Field(default=False, description="Whether obstacles were checked")
-    image_url: str = Field(..., description="URL or static path to camera image snapshot")
-    vehicle_count: int = Field(..., ge=0, description="Number of vehicles detected by computer vision")
-    traffic_density_score: float = Field(
-        ..., ge=0.0, le=1.0, description="Normalized traffic congestion score (0.0 to 1.0)"
+    image_url: str = Field(default="", description="URL or static path to camera image snapshot")
+    has_image: bool = Field(default=False, description="Whether a valid snapshot is currently cached and viewable")
+    image_access_status: ImageAccessStatus = Field(
+        default=ImageAccessStatus.UNAVAILABLE, description="Real accessibility of image snapshot"
     )
-    flood_ratio: float = Field(
-        ..., ge=0.0, le=1.0, description="Water segmentation ratio of the road surface (0.0 to 1.0)"
+    evidence_eligibility: EvidenceEligibility = Field(
+        default=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+        description="Verification gate for route risk scoring",
+    )
+    captured_at: Optional[datetime] = Field(default=None, description="Physical frame capture timestamp")
+    retrieved_at: Optional[datetime] = Field(default=None, description="System fetch timestamp")
+    analyzed_at: Optional[datetime] = Field(default=None, description="ML inference completion timestamp")
+    source_updated_at: Optional[datetime] = Field(default=None, description="Portal origin update timestamp")
+    source_url: Optional[str] = Field(default=None, description="External origin URL for public view reference")
+    image_status: Optional[str] = Field(default=None, description="Technical status of image frame")
+    image_status_reason: Optional[str] = Field(default=None, description="Reason code explaining image status")
+    model_status: Optional[str] = Field(default=None, description="Status of vision models")
+    vehicle_model_name: Optional[str] = None
+    vehicle_model_version: Optional[str] = None
+    vehicle_model_sha256: Optional[str] = None
+    vehicle_model_provenance: Optional[str] = None
+    vehicle_model_validation: Optional[str] = None
+    flood_model_status: Optional[str] = None
+    vehicle_count: Optional[int] = Field(
+        default=None, ge=0, description="Number of vehicles detected; None when unobserved or unanalyzed"
+    )
+    traffic_density_score: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0, description="Normalized traffic congestion score; None when unanalyzed"
+    )
+    flood_ratio: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0, description="Water segmentation ratio; None when unanalyzed"
     )
     risk_level: RiskLevel = Field(..., description="Computed risk level for this camera feed")
     source_status: DataSourceStatus = Field(..., description="Current status of the camera feed")
     updated_at: datetime = Field(..., description="Timestamp when evidence was processed")
+
+
+class CameraImageMetadata(BaseModel):
+    """
+    Dedicated metadata response describing snapshot availability, provenance, ETag,
+    access control, and eligibility reasons without serving large image bytes.
+    """
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    cam_id: str
+    code: Optional[str] = None
+    name: str
+    district: Optional[str] = None
+    lat: float
+    lng: float
+    has_image: bool
+    image_url: Optional[str] = None
+    source_url: Optional[str] = None
+    image_access_status: ImageAccessStatus
+    evidence_eligibility: EvidenceEligibility
+    image_status_reason: str
+    captured_at: Optional[datetime] = None
+    retrieved_at: Optional[datetime] = None
+    analyzed_at: Optional[datetime] = None
+    source_updated_at: Optional[datetime] = None
+    model_status: Optional[str] = None
+    vehicle_count: Optional[int] = None
+    traffic_density_score: Optional[float] = None
+    flood_ratio: Optional[float] = None
+    etag: Optional[str] = None
+    content_length: Optional[int] = None
+    mime_type: Optional[str] = None
 
 
 class WeatherTideSignal(BaseModel):
@@ -80,7 +159,7 @@ class WeatherTideSignal(BaseModel):
     tide_station: Optional[str] = Field(default=None, description="Observing tidal station name (e.g. Phú An, Nhà Bè)")
     tide_datum: Optional[str] = Field(default=None, description="Vertical datum (e.g. Hòn Dấu VN-2000)")
     is_high_tide_alert: Optional[bool] = Field(default=None, description="True if tide exceeds warning threshold; None if unobserved")
-    timestamp: datetime = Field(..., description="Signal recording timestamp")
+    timestamp: Optional[datetime] = Field(default=None, description="Source observation timestamp; None when neither signal was observed")
     source_url: Optional[str] = Field(default=None, description="Source URL of environmental data")
 
 
@@ -98,6 +177,10 @@ class RouteSegmentRisk(BaseModel):
     geojson_path: Optional[Dict[str, Any]] = Field(default=None, description="Actual OSRM step LineString")
     street_name: Optional[str] = Field(default=None, description="Human-readable street name")
     length_meters: float = Field(..., ge=0.0, description="Segment length in meters")
+    maneuver_type: Optional[str] = Field(default=None, description="Raw OSRM step maneuver type")
+    maneuver_modifier: Optional[str] = Field(default=None, description="Raw OSRM turn direction modifier")
+    maneuver_location: Optional[List[float]] = Field(default=None, description="Raw OSRM maneuver point [longitude, latitude]")
+    maneuver_exit: Optional[int] = Field(default=None, description="Raw OSRM roundabout exit number")
     risk_score: Optional[float] = Field(
         default=None, ge=0.0, le=100.0, description="Verified risk score, absent when evidence is insufficient"
     )
@@ -176,4 +259,30 @@ class WebSocketAlertMessage(BaseModel):
     observed_at: datetime = Field(..., description="Observation timestamp")
     expiry: Optional[datetime] = Field(default=None, description="Expiration time after which alert is stale")
 
+
+class PlaceResult(BaseModel):
+    """Geocoded place, address, or POI candidate."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str = Field(..., description="Unique identifier for the place")
+    name: str = Field(..., description="Short place or street name")
+    display_name: str = Field(..., description="Full formatted address or landmark name")
+    lat: float = Field(..., ge=-90.0, le=90.0, description="WGS84 Latitude")
+    lng: float = Field(..., ge=-180.0, le=180.0, description="WGS84 Longitude")
+    osm_type: Optional[str] = Field(default=None, description="OSM node/way/relation type")
+    osm_id: Optional[int] = Field(default=None, description="OSM entity ID")
+    type: Optional[str] = Field(default=None, description="Feature type (e.g. street, poi, amenity)")
+    district: Optional[str] = Field(default=None, description="District or county name")
+    city: Optional[str] = Field(default=None, description="City or province name")
+    provenance: str = Field(default="photon.komoot.io", description="Data provenance of this geocoded location")
+
+
+class PlaceSearchResponse(BaseModel):
+    """Response containing place search results and provenance metadata."""
+    model_config = ConfigDict(from_attributes=True)
+
+    query: str = Field(..., description="Normalized search query string")
+    results: List[PlaceResult] = Field(default_factory=list, description="List of matched locations")
+    provider: str = Field(..., description="Geocoding provider used (photon, postgis, or fallback)")
+    count: int = Field(..., description="Number of results returned")
 

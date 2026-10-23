@@ -183,7 +183,11 @@ async def test_get_camera_image_endpoint_zero_mock():
         assert r1.json()["detail"]["code"] == "CAMERA_NOT_FOUND"
 
         # 2. Registered ID without downloaded image
-        r2 = await client.get("/api/v1/cameras/56de42f611f398ec0c48127d/image")
+        unscraped_cam_id = "587478d8b807da0011e33cf3"
+        target_file = f"storage/cams/{unscraped_cam_id}.jpg"
+        if os.path.exists(target_file):
+            os.remove(target_file)
+        r2 = await client.get(f"/api/v1/cameras/{unscraped_cam_id}/image")
         assert r2.status_code == 404
         assert r2.json()["detail"]["code"] == "CAMERA_IMAGE_UNAVAILABLE"
 
@@ -195,17 +199,144 @@ async def test_scraper_permission_gate_and_tls(monkeypatch):
     and marked PERMISSION_UNVERIFIED without sending unauthorized requests.
     """
     monkeypatch.setattr(settings, "CAMERA_INGESTION_PERMITTED", False)
+    monkeypatch.setattr(settings, "CAMERA_ALLOW_VIEW_ONLY", False)
     cam_meta = {
-        "cam_id": "56de42f611f398ec0c48127d",
-        "code": "TTH 1.1",
-        "name": "Mai Chí Thọ",
+        "cam_id": "test_permission_gate_cam_123",
+        "code": "TEST 1.1",
+        "name": "Test Cam",
         "lat": 10.8049,
         "lng": 106.7527,
     }
 
     async with httpx.AsyncClient(verify=True, timeout=5.0) as client:
-        res = await scrape_camera_image(client, cam_meta)
-        # Should not scrape when CAMERA_INGESTION_PERMITTED is False
+        res = await scrape_camera_image(client, cam_meta, allow_view_only=False)
+        # Should not scrape when CAMERA_INGESTION_PERMITTED is False and allow_view_only is False
         assert not res.is_valid_image
         assert "PERMISSION_UNVERIFIED" in (res.validation_status or "")
+
+
+@pytest.mark.asyncio
+async def test_path_traversal_protection():
+    """
+    Verifies that path traversal attacks in cam_id parameter are strictly rejected with HTTP 400 or 404,
+    and invalid camera slugs return 400 INVALID_CAMERA_ID.
+    """
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Unsafe IDs that reach route handler trigger 400 INVALID_CAMERA_ID
+        for bad_id in ["cam..test", "cam\\..\\test", "cam%5C..%5Ctest", "bad_camera_name!", "a" * 70]:
+            r1 = await client.get(f"/api/v1/cameras/{bad_id}/image")
+            assert r1.status_code == 400
+            assert r1.json()["detail"]["code"] == "INVALID_CAMERA_ID"
+
+            r2 = await client.get(f"/api/v1/cameras/{bad_id}/metadata")
+            assert r2.status_code == 400
+            assert r2.json()["detail"]["code"] == "INVALID_CAMERA_ID"
+
+        # 2. Path-separator traversal attempts are blocked by URL routing (404)
+        for slash_traversal in ["../../etc/passwd", "..%2F..%2Fetc%2Fpasswd", "test/image"]:
+            r = await client.get(f"/api/v1/cameras/{slash_traversal}/image")
+            assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_null_is_not_zero_in_camera_list():
+    """
+    Zero-Mock: Unobserved or unanalyzed cameras must have vehicle_count=None,
+    flood_ratio=None, traffic_density_score=None. Null is NOT zero!
+    """
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/v1/cameras")
+        assert resp.status_code == 200
+        cameras = resp.json()
+        assert len(cameras) >= 700
+
+        # Cameras without active vision inference MUST have None for metrics
+        unanalyzed = [c for c in cameras if c.get("model_status") in (None, "NOT_ANALYZED")]
+        assert len(unanalyzed) > 0
+        for cam in unanalyzed[:50]:
+            assert cam["vehicle_count"] is None, f"Cam {cam['cam_id']} vehicle_count must be None, got {cam['vehicle_count']}"
+            assert cam["flood_ratio"] is None, f"Cam {cam['cam_id']} flood_ratio must be None, got {cam['flood_ratio']}"
+            assert cam["traffic_density_score"] is None
+            assert cam["risk_level"] == "UNKNOWN"
+            assert cam["evidence_eligibility"] == "NOT_VERIFIED_FOR_ROUTING"
+
+
+@pytest.mark.asyncio
+async def test_camera_metadata_endpoint_and_view_only_gate():
+    """
+    Tests GET /api/v1/cameras/{id}/metadata:
+    - Returns structured technical metadata (provenance, access status, reason codes).
+    - When no image is cached, reports IMAGE_UNAVAILABLE or EXTERNAL_ACCESS_RESTRICTED.
+    - View-only images are never elevated to ROUTING_ELIGIBLE.
+    """
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        # 1. Registered camera with no cached image
+        cam_id = "595dd6093dcfc400106f28ad"
+        resp = await client.get(f"/api/v1/cameras/{cam_id}/metadata")
+        assert resp.status_code == 200
+        meta = resp.json()
+        assert meta["cam_id"] == cam_id
+        assert meta["evidence_eligibility"] == "NOT_VERIFIED_FOR_ROUTING"
+        assert meta["image_status_reason"] in ("IMAGE_UNAVAILABLE", "EXTERNAL_ACCESS_RESTRICTED", "VALID_IMAGE_CACHED")
+
+        # 2. Unknown camera returns 404 CAMERA_NOT_FOUND
+        r_not_found = await client.get("/api/v1/cameras/ffffffffffffffffffffffff/metadata")
+        assert r_not_found.status_code == 404
+        assert r_not_found.json()["detail"]["code"] == "CAMERA_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_etag_and_caching_and_headers():
+    """
+    Tests serving valid cached snapshot:
+    - Returns HTTP 200 with ETag, Cache-Control, and custom provenance headers.
+    - Supports HTTP 304 Not Modified when client provides matching If-None-Match.
+    - View-only cached snapshot retains evidence_eligibility=NOT_VERIFIED_FOR_ROUTING.
+    """
+    cam_id = "595dd6093dcfc400106f28ad"
+    storage_dir = "storage/cams"
+    os.makedirs(storage_dir, exist_ok=True)
+    target_path = os.path.join(storage_dir, f"{cam_id}.jpg")
+
+    # Create a valid synthetic road-like test frame to test serving semantics
+    valid_img = Image.new("RGB", (300, 230))
+    pixels = valid_img.load()
+    for x in range(300):
+        for y in range(230):
+            pixels[x, y] = (x % 256, (y * 2) % 256, (x + y) % 256)
+    valid_buf = io.BytesIO()
+    valid_img.save(valid_buf, format="JPEG")
+    test_bytes = valid_buf.getvalue()
+
+    with open(target_path, "wb") as f:
+        f.write(test_bytes)
+
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            # 1. Fetch image -> 200
+            res = await client.get(f"/api/v1/cameras/{cam_id}/image")
+            assert res.status_code == 200
+            assert "etag" in res.headers
+            assert res.headers.get("x-image-access-status") == "VIEWABLE_PUBLIC"
+            assert res.headers.get("x-evidence-eligibility") == "NOT_VERIFIED_FOR_ROUTING"
+            etag = res.headers["etag"]
+
+            # 2. Fetch with If-None-Match -> 304 Not Modified
+            res_304 = await client.get(
+                f"/api/v1/cameras/{cam_id}/image",
+                headers={"if-none-match": etag},
+            )
+            assert res_304.status_code == 304
+
+            # 3. Metadata endpoint reflects cached image
+            res_meta = await client.get(f"/api/v1/cameras/{cam_id}/metadata")
+            assert res_meta.status_code == 200
+            meta = res_meta.json()
+            assert meta["has_image"] is True
+            assert meta["image_status_reason"] == "VALID_IMAGE_CACHED"
+            assert meta["evidence_eligibility"] == "NOT_VERIFIED_FOR_ROUTING"
+    finally:
+        if os.path.exists(target_path):
+            os.remove(target_path)
+
 

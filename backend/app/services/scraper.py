@@ -8,15 +8,17 @@ implements rate-limiting, and honors data usage permissions.
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import logging
 import os
 import random
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 from backend.app.core.config import settings
-from backend.app.schemas.contracts import DataSourceStatus
+from backend.app.schemas.contracts import DataSourceStatus, EvidenceEligibility, ImageAccessStatus
 from backend.app.services.image_validator import (
     ImageValidationResult,
     ImageValidationStatus,
@@ -27,6 +29,75 @@ logger = logging.getLogger(__name__)
 
 # Minimum byte threshold for a valid decoded camera JPEG frame
 MIN_VALID_IMAGE_BYTES: int = 2500
+
+# Strict Path-Traversal Guard Regex
+CAM_ID_PATTERN = re.compile(r"^[0-9a-fA-F]{24}$")
+SAFE_SLUG_PATTERN = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
+
+
+def is_valid_cam_id(cam_id: str) -> bool:
+    """Validates that camera ID contains no directory traversal sequences."""
+    if not cam_id or not isinstance(cam_id, str):
+        return False
+    if ".." in cam_id or "/" in cam_id or "\\" in cam_id:
+        return False
+    return bool(CAM_ID_PATTERN.match(cam_id) or SAFE_SLUG_PATTERN.match(cam_id))
+
+
+class CircuitBreaker:
+    """Circuit breaker preventing excessive spam when external portal restricts access (403/429)."""
+    def __init__(self, failure_threshold: int = 3, reset_timeout_sec: float = 60.0):
+        self.failure_threshold = failure_threshold
+        self.reset_timeout_sec = reset_timeout_sec
+        self.consecutive_failures = 0
+        self.last_failure_time = 0.0
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+
+    def record_failure(self, status_code: int):
+        if status_code in (403, 429):
+            self.consecutive_failures += 1
+            self.last_failure_time = time.time()
+            if self.consecutive_failures >= self.failure_threshold:
+                self.state = "OPEN"
+                logger.warning(
+                    "Circuit breaker tripped OPEN: External camera portal returned %d repeated errors.",
+                    status_code,
+                )
+
+    def record_success(self):
+        self.consecutive_failures = 0
+        self.state = "CLOSED"
+
+    def can_request(self) -> bool:
+        if self.state == "CLOSED":
+            return True
+        if time.time() - self.last_failure_time > self.reset_timeout_sec:
+            self.state = "HALF_OPEN"
+            return True
+        return False
+
+
+# Global circuit breaker instance for HCMC traffic portal
+portal_circuit_breaker = CircuitBreaker()
+
+
+def evict_stale_disk_images(storage_dir: str = "storage/cams", max_hours: int = 24) -> int:
+    """Removes cached snapshot files older than max_hours to control disk usage."""
+    if not os.path.exists(storage_dir):
+        return 0
+    now = time.time()
+    cutoff = now - (max_hours * 3600)
+    evicted = 0
+    for fname in os.listdir(storage_dir):
+        if fname.endswith(".jpg") or fname.endswith(".png"):
+            fpath = os.path.join(storage_dir, fname)
+            try:
+                if os.path.isfile(fpath) and os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+                    evicted += 1
+            except Exception as e:
+                logger.debug("Stale image eviction skipped %s: %s", fpath, e)
+    return evicted
 
 
 @dataclass
@@ -48,6 +119,10 @@ class ScrapedCameraResult:
     is_valid_image: bool
     validation_status: Optional[str] = None
     error_message: Optional[str] = None
+    image_access_status: ImageAccessStatus = ImageAccessStatus.UNAVAILABLE
+    evidence_eligibility: EvidenceEligibility = EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
+    image_status_reason: Optional[str] = None
+    etag: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -66,6 +141,10 @@ class ScrapedCameraResult:
             "is_valid_image": self.is_valid_image,
             "validation_status": self.validation_status,
             "error_message": self.error_message,
+            "image_access_status": self.image_access_status.value,
+            "evidence_eligibility": self.evidence_eligibility.value,
+            "image_status_reason": self.image_status_reason,
+            "etag": self.etag,
         }
 
 
@@ -138,14 +217,17 @@ async def scrape_camera_image(
     storage_dir: str = "storage/cams",
     previous_md5: Optional[str] = None,
     previous_dhash: Optional[str] = None,
+    allow_view_only: Optional[bool] = None,
 ) -> ScrapedCameraResult:
     """
     Downloads snapshot for a single camera applying strict validation and zero mock:
-    - Verifies permissions before ingestion.
-    - Validates magic bytes, Pillow decode, dimensions, placeholders, and dark frames.
-    - Returns DataSourceStatus.LIVE if fresh valid image obtained.
+    - Path traversal guard on cam_id.
+    - Differentiates VIEWABLE_PUBLIC vs ROUTING_ELIGIBLE evidence.
+    - Validates magic bytes, Pillow decode, dimensions, server error placeholders.
+    - Returns DataSourceStatus.LIVE only if fresh valid image obtained within TTL.
     - Falls back to existing local file on disk as DataSourceStatus.STALE if network fails.
-    - If neither is available, reports error without creating mock images.
+    - Circuit breaker trips on repeated 403/429 to protect provider endpoints.
+    - Never generates mock or fabricated frames.
     """
     cam_id = str(cam.get("cam_id") or "")
     code = cam.get("code")
@@ -156,10 +238,37 @@ async def scrape_camera_image(
 
     now = datetime.now(timezone.utc)
     os.makedirs(storage_dir, exist_ok=True)
-    local_image_path = os.path.join(storage_dir, f"{cam_id}.jpg")
 
-    # 1. Permission Gate: Do not scrape if ingestion permission is unverified
-    if not settings.CAMERA_INGESTION_PERMITTED:
+    # 0. Path Traversal Guard
+    if not is_valid_cam_id(cam_id):
+        return ScrapedCameraResult(
+            cam_id=cam_id,
+            code=code,
+            name=name,
+            district=district,
+            lat=lat,
+            lng=lng,
+            image_path=None,
+            image_bytes=None,
+            source_status=DataSourceStatus.STALE,
+            retrieved_at=now,
+            captured_at=None,
+            capture_time_status="CAPTURE_TIME_UNKNOWN",
+            file_size=0,
+            is_valid_image=False,
+            validation_status="INVALID_CAMERA_ID",
+            error_message="Camera ID contains invalid characters or path traversal elements.",
+            image_access_status=ImageAccessStatus.UNAVAILABLE,
+            evidence_eligibility=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+            image_status_reason="INVALID_CAMERA_ID",
+        )
+
+    local_image_path = os.path.join(storage_dir, f"{cam_id}.jpg")
+    can_view_only = allow_view_only if allow_view_only is not None else settings.CAMERA_ALLOW_VIEW_ONLY
+    can_ingest_evidence = settings.CAMERA_INGESTION_PERMITTED
+
+    # 1. Permission Gate
+    if not can_ingest_evidence and not can_view_only:
         # Check if verified local cached image exists from permitted archival
         if os.path.exists(local_image_path):
             with open(local_image_path, "rb") as f:
@@ -183,6 +292,10 @@ async def scrape_camera_image(
                     is_valid_image=True,
                     validation_status="VALID_LOCAL_ARCHIVE",
                     error_message="PERMISSION_UNVERIFIED: Ingestion disabled by configuration.",
+                    image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
+                    evidence_eligibility=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+                    image_status_reason="VALID_IMAGE_CACHED",
+                    etag=hashlib.md5(cached_bytes).hexdigest(),
                 )
 
         return ScrapedCameraResult(
@@ -202,26 +315,99 @@ async def scrape_camera_image(
             is_valid_image=False,
             validation_status="PERMISSION_UNVERIFIED",
             error_message="PERMISSION_UNVERIFIED: Set CAMERA_INGESTION_PERMITTED=true with valid credentials.",
+            image_access_status=ImageAccessStatus.UNAVAILABLE,
+            evidence_eligibility=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+            image_status_reason="PERMISSION_UNVERIFIED",
         )
 
-    # 2. Attempt live download over TLS (verify=True)
+    # 2. Check Circuit Breaker before making outbound request
+    if not portal_circuit_breaker.can_request():
+        # Fall back to local file if available
+        if os.path.exists(local_image_path):
+            try:
+                with open(local_image_path, "rb") as f:
+                    cached_bytes = f.read()
+                val_result = validate_camera_image_bytes(cached_bytes)
+                if val_result.is_valid:
+                    return ScrapedCameraResult(
+                        cam_id=cam_id,
+                        code=code,
+                        name=name,
+                        district=district,
+                        lat=lat,
+                        lng=lng,
+                        image_path=local_image_path,
+                        image_bytes=cached_bytes,
+                        source_status=DataSourceStatus.STALE,
+                        retrieved_at=now,
+                        captured_at=None,
+                        capture_time_status="CAPTURE_TIME_UNKNOWN",
+                        file_size=len(cached_bytes),
+                        is_valid_image=True,
+                        validation_status="VALID_LOCAL_STALE",
+                        error_message="Circuit breaker active; serving local cache.",
+                        image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
+                        evidence_eligibility=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+                        image_status_reason="VALID_IMAGE_CACHED",
+                        etag=hashlib.md5(cached_bytes).hexdigest(),
+                    )
+            except Exception:
+                pass
+
+        return ScrapedCameraResult(
+            cam_id=cam_id,
+            code=code,
+            name=name,
+            district=district,
+            lat=lat,
+            lng=lng,
+            image_path=None,
+            image_bytes=None,
+            source_status=DataSourceStatus.STALE,
+            retrieved_at=now,
+            captured_at=None,
+            capture_time_status="CAPTURE_TIME_UNKNOWN",
+            file_size=0,
+            is_valid_image=False,
+            validation_status="EXTERNAL_ACCESS_RESTRICTED",
+            error_message="Circuit breaker open: HCMC traffic portal restricted direct requests (403/429).",
+            image_access_status=ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED,
+            evidence_eligibility=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+            image_status_reason="EXTERNAL_ACCESS_RESTRICTED",
+        )
+
+    # 3. Attempt live download over TLS (verify=True)
     target_url = build_camera_image_url(cam_id)
     headers = get_camera_request_headers()
     download_err: Optional[str] = None
     val_result: Optional[ImageValidationResult] = None
+    status_reason: str = "IMAGE_UNAVAILABLE"
 
     try:
         response = await client.get(target_url, headers=headers)
         if response.status_code == 200:
+            portal_circuit_breaker.record_success()
             val_result = validate_camera_image_bytes(
                 response.content,
                 previous_md5=previous_md5,
                 previous_dhash=previous_dhash,
             )
             if val_result.is_valid:
-                # Valid live frame! Save to disk atomically
+                # Valid frame! Save to disk atomically
                 with open(local_image_path, "wb") as f:
                     f.write(response.content)
+
+                etag_val = val_result.md5_hash
+                eligibility = (
+                    EvidenceEligibility.ROUTING_ELIGIBLE
+                    if (settings.CAMERA_ROUTING_EVIDENCE_PERMITTED and val_result.captured_at is not None)
+                    else EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
+                )
+                source_st = (
+                    DataSourceStatus.LIVE
+                    if (val_result.captured_at is None or (now - val_result.captured_at).total_seconds() <= settings.CAMERA_IMAGE_TTL_SECONDS)
+                    else DataSourceStatus.STALE
+                )
 
                 return ScrapedCameraResult(
                     cam_id=cam_id,
@@ -232,7 +418,7 @@ async def scrape_camera_image(
                     lng=lng,
                     image_path=local_image_path,
                     image_bytes=response.content,
-                    source_status=DataSourceStatus.LIVE,
+                    source_status=source_st,
                     retrieved_at=now,
                     captured_at=val_result.captured_at,
                     capture_time_status=val_result.capture_time_status,
@@ -240,22 +426,35 @@ async def scrape_camera_image(
                     is_valid_image=True,
                     validation_status=val_result.status.value,
                     error_message=None,
+                    image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
+                    evidence_eligibility=eligibility,
+                    image_status_reason="VALID_IMAGE_CACHED",
+                    etag=etag_val,
                 )
             else:
-                download_err = f"Validation failed ({val_result.status.value}): {val_result.error_message}"
+                if val_result.status == ImageValidationStatus.PLACEHOLDER_ERROR_FRAME:
+                    status_reason = "PLACEHOLDER_FRAME"
+                    download_err = "Server returned 'IMAGE NOT AVAILABLE' placeholder frame"
+                else:
+                    status_reason = val_result.status.value
+                    download_err = f"Validation failed ({val_result.status.value}): {val_result.error_message}"
                 logger.warning("Camera %s received invalid frame: %s", cam_id, download_err)
         elif response.status_code in (403, 429):
-            download_err = f"HTTP {response.status_code} (Rate limited / Forbidden)"
+            portal_circuit_breaker.record_failure(response.status_code)
+            status_reason = "EXTERNAL_ACCESS_RESTRICTED"
+            download_err = f"HTTP {response.status_code} (Rate limited / Forbidden by portal)"
             logger.warning("Camera %s rate limited or forbidden: %s", cam_id, download_err)
         else:
+            status_reason = "NETWORK_FAILURE"
             download_err = f"HTTP {response.status_code}"
             logger.warning("Camera %s download failed: %s", cam_id, download_err)
 
     except Exception as exc:
+        status_reason = "NETWORK_FAILURE"
         download_err = f"{type(exc).__name__}: {exc}"
         logger.warning("Camera %s connection exception: %s", cam_id, download_err)
 
-    # 3. Check for existing local stale image on disk
+    # 4. Check for existing local stale image on disk
     if os.path.exists(local_image_path):
         try:
             with open(local_image_path, "rb") as f:
@@ -279,11 +478,20 @@ async def scrape_camera_image(
                     is_valid_image=True,
                     validation_status="VALID_LOCAL_STALE",
                     error_message=download_err,
+                    image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
+                    evidence_eligibility=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+                    image_status_reason="VALID_IMAGE_CACHED",
+                    etag=hashlib.md5(stale_bytes).hexdigest(),
                 )
         except Exception:
             pass
 
-    # 4. Strict Zero-Mock: Do not generate mock frames. Report unavailable truthfully.
+    # 5. Strict Zero-Mock: Do not generate mock frames. Report unavailable truthfully.
+    access_st = (
+        ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED
+        if status_reason == "EXTERNAL_ACCESS_RESTRICTED"
+        else ImageAccessStatus.UNAVAILABLE
+    )
     return ScrapedCameraResult(
         cam_id=cam_id,
         code=code,
@@ -299,8 +507,11 @@ async def scrape_camera_image(
         capture_time_status="CAPTURE_TIME_UNKNOWN",
         file_size=0,
         is_valid_image=False,
-        validation_status=val_result.status.value if val_result else "DOWNLOAD_FAILED",
+        validation_status=val_result.status.value if val_result else status_reason,
         error_message=f"Live fetch failed ({download_err}) and no valid local cache exists.",
+        image_access_status=access_st,
+        evidence_eligibility=EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING,
+        image_status_reason=status_reason,
     )
 
 

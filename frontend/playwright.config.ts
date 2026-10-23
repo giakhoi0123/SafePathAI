@@ -21,6 +21,6 @@ export default defineConfig({
   webServer: process.env.PLAYWRIGHT_EXTERNAL_SERVER ? undefined : {
     command: "npm run start -- -p 3100",
     port: 3100,
-    reuseExistingServer: false,
+    reuseExistingServer: true,
   },
 });
