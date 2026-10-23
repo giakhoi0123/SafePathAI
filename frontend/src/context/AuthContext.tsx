@@ -1,11 +1,13 @@
 "use client";
 
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import { SessionProvider, useSession, signIn, signOut } from "next-auth/react";
 
 export interface SavedPlace {
   id: string;
-  label: "Nhà" | "Cơ quan" | "Trường học" | "Khác";
+  label: string;
   name: string;
+  address?: string;
   lat: number;
   lng: number;
 }
@@ -23,7 +25,7 @@ export interface UserProfile {
   id: string;
   name: string;
   email: string;
-  avatar: string;
+  avatar: string | null;
   vehicle: "motorcycle" | "car";
   rainAlertsEnabled: boolean;
   tideAlertsEnabled: boolean;
@@ -33,139 +35,324 @@ export interface UserProfile {
 
 interface AuthContextType {
   user: UserProfile | null;
+  isAuthenticated: boolean;
+  isLoading: boolean;
   isConfigured: boolean;
+  oauthStatus: "CONFIGURED" | "BLOCKED_CONFIGURATION" | "CHECKING";
   loginWithGoogle: () => Promise<void>;
-  loginDemo: () => void;
-  logout: () => void;
-  updateVehicle: (vehicle: "motorcycle" | "car") => void;
-  savePlace: (place: Omit<SavedPlace, "id">) => void;
-  removeSavedPlace: (id: string) => void;
-  addRouteHistory: (item: Omit<RouteHistoryItem, "id" | "timestamp">) => void;
+  logout: () => Promise<void>;
+  updateVehicle: (vehicle: "motorcycle" | "car") => Promise<void>;
+  savePlace: (place: { name: string; address?: string; lat: number; lng: number; label?: string }) => Promise<void>;
+  removeSavedPlace: (id: string) => Promise<void>;
+  addRouteHistory: (item: {
+    originName: string;
+    destName: string;
+    distanceKm: number;
+    durationMins: number;
+    originLat?: number;
+    originLng?: number;
+    destLat?: number;
+    destLng?: number;
+  }) => Promise<void>;
+  refreshProfile: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-const STORAGE_KEY = "safepath.user_profile";
-
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+function InnerAuthProvider({ children }: { children: React.ReactNode }) {
+  const { data: session, status } = useSession();
   const [user, setUser] = useState<UserProfile | null>(null);
-  const isConfigured = Boolean(process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID);
+  const [isConfigured, setIsConfigured] = useState<boolean>(false);
+  const [oauthStatus, setOauthStatus] = useState<"CONFIGURED" | "BLOCKED_CONFIGURATION" | "CHECKING">("CHECKING");
+  const [isLoadingProfile, setIsLoadingProfile] = useState<boolean>(false);
 
+  // Check Google OAuth server configuration status on mount
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        setUser(JSON.parse(saved));
+    let isMounted = true;
+    async function checkAuthStatus() {
+      try {
+        const res = await fetch("/api/v1/auth/status");
+        if (res.ok) {
+          const data = await res.json();
+          if (isMounted) {
+            setIsConfigured(Boolean(data.google_oauth_configured));
+            setOauthStatus(data.status === "CONFIGURED" ? "CONFIGURED" : "BLOCKED_CONFIGURATION");
+          }
+        } else {
+          if (isMounted) {
+            setIsConfigured(false);
+            setOauthStatus("BLOCKED_CONFIGURATION");
+          }
+        }
+      } catch (err) {
+        if (isMounted) {
+          setIsConfigured(false);
+          setOauthStatus("BLOCKED_CONFIGURATION");
+        }
       }
-    } catch (e) {
-      console.warn("Could not read user profile from storage:", e);
     }
+    checkAuthStatus();
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
-  const saveToStorage = (profile: UserProfile | null) => {
-    setUser(profile);
-    if (profile) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
-    } else {
-      localStorage.removeItem(STORAGE_KEY);
+  // Fetch or sync user profile with PostgreSQL backend when authenticated
+  const refreshProfile = useCallback(async () => {
+    if (status !== "authenticated" || !session?.user?.email) {
+      setUser(null);
+      return;
     }
-  };
+
+    setIsLoadingProfile(true);
+    try {
+      // 1. First sync to ensure account exists in database
+      const syncRes = await fetch("/api/v1/user/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          provider: "google",
+          provider_account_id: (session.user as any).providerAccountId || (session.user as any).id || session.user.email,
+          email: session.user.email,
+          display_name: session.user.name || "Người dùng Google",
+          avatar_url: session.user.image || null,
+        }),
+      });
+
+      if (syncRes.ok) {
+        const data = await syncRes.json();
+        setUser({
+          id: data.id,
+          name: data.display_name,
+          email: data.email,
+          avatar: data.avatar_url,
+          vehicle: (data.preferences?.transport_mode === "car" ? "car" : "motorcycle"),
+          rainAlertsEnabled: Boolean(data.preferences?.alert_notifications),
+          tideAlertsEnabled: Boolean(data.preferences?.alert_notifications),
+          savedPlaces: (data.saved_places || []).map((sp: any) => ({
+            id: sp.id,
+            label: sp.category || "Địa điểm",
+            name: sp.name,
+            address: sp.address,
+            lat: sp.lat,
+            lng: sp.lng,
+          })),
+          history: (data.route_history || []).map((rh: any) => ({
+            id: rh.id,
+            originName: rh.origin_name,
+            destName: rh.dest_name,
+            distanceKm: rh.distance_km,
+            durationMins: rh.duration_mins,
+            timestamp: rh.created_at || new Date().toISOString(),
+          })),
+        });
+      }
+    } catch (err) {
+      console.warn("Could not sync user profile with backend:", err);
+    } finally {
+      setIsLoadingProfile(false);
+    }
+  }, [session, status]);
+
+  useEffect(() => {
+    if (status === "authenticated") {
+      refreshProfile();
+    } else if (status === "unauthenticated") {
+      setUser(null);
+    }
+  }, [status, refreshProfile]);
 
   const loginWithGoogle = async () => {
     if (!isConfigured) {
-      // Graceful fallback to verified demo user when OAuth credentials are not provided
-      loginDemo();
+      console.warn("Google OAuth is not configured in backend/frontend environment (BLOCKED_CONFIGURATION).");
       return;
     }
-    // Real Google OAuth redirect or SDK prompt when credentials present
-    window.location.href = `/api/auth/signin/google`;
+    await signIn("google");
   };
 
-  const loginDemo = () => {
-    const demoProfile: UserProfile = {
-      id: "usr_google_hcm_01",
-      name: "Nguyễn Văn An",
-      email: "an.nguyen@example.com",
-      avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80",
-      vehicle: "motorcycle",
-      rainAlertsEnabled: true,
-      tideAlertsEnabled: true,
-      savedPlaces: [
-        { id: "sp_1", label: "Nhà", name: "Chợ Bến Thành (Quận 1)", lat: 10.7725, lng: 106.6980 },
-        { id: "sp_2", label: "Cơ quan", name: "Landmark 81 (Bình Thạnh)", lat: 10.7950, lng: 106.7218 },
-      ],
-      history: [
-        {
-          id: "hist_1",
-          originName: "Chợ Bến Thành",
-          destName: "Ngã tư Hàng Xanh",
-          distanceKm: 4.5,
-          durationMins: 12.0,
-          timestamp: new Date(Date.now() - 3600000).toISOString(),
+  const logout = async () => {
+    setUser(null);
+    await signOut();
+  };
+
+  const updateVehicle = async (vehicle: "motorcycle" | "car") => {
+    if (!user) return;
+    try {
+      await fetch("/api/v1/user/preferences", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": user.id,
         },
-      ],
-    };
-    saveToStorage(demoProfile);
+        body: JSON.stringify({
+          transport_mode: vehicle,
+          avoid_flood_level: "MEDIUM",
+          avoid_high_density: false,
+          alert_notifications: user.rainAlertsEnabled,
+          voice_guidance_enabled: true,
+        }),
+      });
+      setUser((prev) => (prev ? { ...prev, vehicle } : null));
+    } catch (err) {
+      console.error("Failed to update vehicle preference:", err);
+    }
   };
 
-  const logout = () => {
-    saveToStorage(null);
-  };
-
-  const updateVehicle = (vehicle: "motorcycle" | "car") => {
+  const savePlace = async (place: { name: string; address?: string; lat: number; lng: number; label?: string }) => {
     if (!user) return;
-    saveToStorage({ ...user, vehicle });
+    try {
+      const res = await fetch("/api/v1/user/saved-places", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": user.id,
+        },
+        body: JSON.stringify({
+          name: place.name,
+          address: place.address || place.name,
+          lat: place.lat,
+          lng: place.lng,
+          category: place.label || "favorite",
+        }),
+      });
+      if (res.ok) {
+        const saved = await res.json();
+        setUser((prev) =>
+          prev
+            ? {
+                ...prev,
+                savedPlaces: [
+                  ...prev.savedPlaces,
+                  {
+                    id: saved.id,
+                    label: saved.category,
+                    name: saved.name,
+                    address: saved.address,
+                    lat: saved.lat,
+                    lng: saved.lng,
+                  },
+                ],
+              }
+            : null
+        );
+      }
+    } catch (err) {
+      console.error("Failed to save place:", err);
+    }
   };
 
-  const savePlace = (place: Omit<SavedPlace, "id">) => {
+  const removeSavedPlace = async (id: string) => {
     if (!user) return;
-    const newPlace: SavedPlace = { ...place, id: `sp_${Date.now()}` };
-    saveToStorage({ ...user, savedPlaces: [...user.savedPlaces, newPlace] });
+    try {
+      const res = await fetch(`/api/v1/user/saved-places/${id}`, {
+        method: "DELETE",
+        headers: { "X-User-Id": user.id },
+      });
+      if (res.ok) {
+        setUser((prev) =>
+          prev
+            ? {
+                ...prev,
+                savedPlaces: prev.savedPlaces.filter((p) => p.id !== id),
+              }
+            : null
+        );
+      }
+    } catch (err) {
+      console.error("Failed to delete saved place:", err);
+    }
   };
 
-  const removeSavedPlace = (id: string) => {
+  const addRouteHistory = async (item: {
+    originName: string;
+    destName: string;
+    distanceKm: number;
+    durationMins: number;
+    originLat?: number;
+    originLng?: number;
+    destLat?: number;
+    destLng?: number;
+  }) => {
     if (!user) return;
-    saveToStorage({
-      ...user,
-      savedPlaces: user.savedPlaces.filter((p) => p.id !== id),
-    });
-  };
-
-  const addRouteHistory = (item: Omit<RouteHistoryItem, "id" | "timestamp">) => {
-    if (!user) return;
-    const historyItem: RouteHistoryItem = {
-      ...item,
-      id: `hist_${Date.now()}`,
-      timestamp: new Date().toISOString(),
-    };
-    saveToStorage({
-      ...user,
-      history: [historyItem, ...user.history.slice(0, 19)],
-    });
+    try {
+      const res = await fetch("/api/v1/user/history", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": user.id,
+        },
+        body: JSON.stringify({
+          origin_name: item.originName,
+          dest_name: item.destName,
+          origin_lat: item.originLat,
+          origin_lng: item.originLng,
+          dest_lat: item.destLat,
+          dest_lng: item.destLng,
+          distance_km: item.distanceKm,
+          duration_mins: item.durationMins,
+          travel_mode: user.vehicle,
+        }),
+      });
+      if (res.ok) {
+        const created = await res.json();
+        setUser((prev) =>
+          prev
+            ? {
+                ...prev,
+                history: [
+                  {
+                    id: created.id,
+                    originName: created.origin_name,
+                    destName: created.dest_name,
+                    distanceKm: created.distance_km,
+                    durationMins: created.duration_mins,
+                    timestamp: created.created_at || new Date().toISOString(),
+                  },
+                  ...prev.history.slice(0, 19),
+                ],
+              }
+            : null
+        );
+      }
+    } catch (err) {
+      console.error("Failed to record route history:", err);
+    }
   };
 
   return (
     <AuthContext.Provider
       value={{
         user,
+        isAuthenticated: status === "authenticated" && Boolean(user),
+        isLoading: status === "loading" || isLoadingProfile,
         isConfigured,
+        oauthStatus,
         loginWithGoogle,
-        loginDemo,
         logout,
         updateVehicle,
         savePlace,
         removeSavedPlace,
         addRouteHistory,
+        refreshProfile,
       }}
     >
       {children}
     </AuthContext.Provider>
   );
+}
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  return (
+    <SessionProvider>
+      <InnerAuthProvider>{children}</InnerAuthProvider>
+    </SessionProvider>
+  );
 };
 
 export const useAuth = () => {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
-  return ctx;
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return context;
 };
-

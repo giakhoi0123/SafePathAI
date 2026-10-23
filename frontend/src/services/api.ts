@@ -7,6 +7,7 @@
 import {
   CameraEvidence,
   CameraImageMetadata,
+  CameraSummary,
   Coordinates,
   PlaceResult,
   PlaceSearchResponse,
@@ -32,6 +33,16 @@ export function getCameraImageUrl(camId: string): string {
     return "";
   }
   return `${API_BASE_URL}/api/v1/cameras/${encodeURIComponent(camId)}/image`;
+}
+
+/**
+ * Returns full URL to fetch a camera's AI-assistive enhanced frame (never replaces original source evidence).
+ */
+export function getCameraEnhancedImageUrl(camId: string): string {
+  if (!camId || !SAFE_CAM_ID_REGEX.test(camId)) {
+    return "";
+  }
+  return `${API_BASE_URL}/api/v1/cameras/${encodeURIComponent(camId)}/image?type=enhanced`;
 }
 
 /**
@@ -75,6 +86,24 @@ export async function fetchCameras(district?: string): Promise<CameraEvidence[]>
     return await res.json();
   } catch (error) {
     console.error("Error in fetchCameras:", error);
+    throw error;
+  }
+}
+
+export async function fetchCameraSummary(): Promise<CameraSummary> {
+  const url = `${API_BASE_URL}/api/v1/cameras/summary`;
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to fetch camera summary: ${res.status} ${res.statusText}`);
+    }
+    return await res.json();
+  } catch (error) {
+    console.error("Error in fetchCameraSummary:", error);
     throw error;
   }
 }

@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { fetchCameras, getCameraImageUrl } from "../../services/api";
-import { CameraEvidence, RiskLevel } from "../../types/contracts";
+import { fetchCameras, fetchCameraSummary, getCameraImageUrl } from "../../services/api";
+import { CameraEvidence, CameraSummary, RiskLevel } from "../../types/contracts";
 import { CameraEvidenceModal } from "../../components/CameraEvidenceModal";
 import {
   Navigation,
@@ -19,11 +19,13 @@ import {
   Radio,
   ArrowLeft,
   LayoutGrid,
+  Sparkles,
 } from "lucide-react";
 import { GlassCard, GlassBadge, GlassButton, GlassInput } from "../../components/Glass";
 
 export default function CameraMonitorPage() {
   const [cameras, setCameras] = useState<CameraEvidence[]>([]);
+  const [summary, setSummary] = useState<CameraSummary | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<CameraEvidence | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [districtFilter, setDistrictFilter] = useState<string>("ALL");
@@ -33,8 +35,12 @@ export default function CameraMonitorPage() {
   const loadCameras = useCallback(async () => {
     setIsLoading(true);
     try {
-      const data = await fetchCameras();
-      setCameras(data);
+      const [cameraList, summaryData] = await Promise.all([
+        fetchCameras(),
+        fetchCameraSummary().catch(() => null),
+      ]);
+      setCameras(cameraList);
+      if (summaryData) setSummary(summaryData);
     } catch (e) {
       console.warn("Failed to load cameras for monitor:", e);
     } finally {
@@ -44,6 +50,13 @@ export default function CameraMonitorPage() {
 
   useEffect(() => {
     loadCameras();
+    const interval = setInterval(async () => {
+      try {
+        const sum = await fetchCameraSummary();
+        setSummary(sum);
+      } catch {}
+    }, 15000);
+    return () => clearInterval(interval);
   }, [loadCameras]);
 
   const districts = Array.from(
@@ -125,6 +138,57 @@ export default function CameraMonitorPage() {
 
       {/* Main Content Area */}
       <main className="flex-1 p-5 max-w-7xl mx-auto w-full space-y-5">
+        {/* Real Network Telemetry Summary */}
+        {summary && (
+          <div data-testid="monitor-telemetry-summary" className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="glass-panel rounded-2xl p-3 border border-white/90 shadow-glass-sm flex flex-col justify-between">
+              <span className="text-[11px] font-semibold text-ink-500 flex items-center gap-1.5">
+                <Camera className="w-3.5 h-3.5 text-indigo-600" />
+                Tổng Camera Đăng Ký
+              </span>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="text-xl font-black text-ink-950 font-mono">{summary.total_registered}</span>
+                <span className="text-[10px] font-medium text-emerald-600">100% WGS84 GPS</span>
+              </div>
+            </div>
+
+            <div className="glass-panel rounded-2xl p-3 border border-white/90 shadow-glass-sm flex flex-col justify-between">
+              <span className="text-[11px] font-semibold text-ink-500 flex items-center gap-1.5">
+                <Radio className="w-3.5 h-3.5 text-blue-600" />
+                Thăm Dò Scheduler
+              </span>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="text-xl font-black text-ink-950 font-mono">{summary.checked_count}</span>
+                <span className="text-[10px] font-medium text-ink-500">/ {summary.total_registered} camera</span>
+              </div>
+            </div>
+
+            <div className="glass-panel rounded-2xl p-3 border border-white/90 shadow-glass-sm flex flex-col justify-between">
+              <span className="text-[11px] font-semibold text-ink-500 flex items-center gap-1.5">
+                <Eye className="w-3.5 h-3.5 text-cyan-600" />
+                Ảnh Trực Tiếp Khả Dụng
+              </span>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="text-xl font-black text-cyan-700 font-mono">{summary.valid_images_count}</span>
+                <span className="text-[10px] font-medium text-ink-500">
+                  {summary.circuit_breaker_open ? "Circuit Open" : "15m Live Frame"}
+                </span>
+              </div>
+            </div>
+
+            <div className="glass-panel rounded-2xl p-3 border border-white/90 shadow-glass-sm flex flex-col justify-between">
+              <span className="text-[11px] font-semibold text-ink-500 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                Đã Phân Tích AI
+              </span>
+              <div className="mt-1 flex items-baseline gap-2">
+                <span className="text-xl font-black text-amber-700 font-mono">{summary.analyzed_count}</span>
+                <span className="text-[10px] font-medium text-ink-500">YOLO + U-Net</span>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Filter Toolbar */}
         <div className="glass-panel rounded-3xl p-4 border border-white/90 shadow-glass space-y-3">
           <div className="flex flex-col md:flex-row items-center gap-3 justify-between">
@@ -216,15 +280,31 @@ export default function CameraMonitorPage() {
                       </div>
                     )}
 
-                    {/* Top camera code badge */}
+                    {/* Top camera code & enhancement badge */}
                     <div className="absolute top-2 left-2 flex items-center gap-1">
                       <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-slate-900/70 text-white backdrop-blur-md">
                         {cam.code || "CAM"}
                       </span>
+                      {cam.enhancement_applied && (
+                        <span className="px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-indigo-600/85 text-white backdrop-blur-md flex items-center gap-0.5" title="Hỗ trợ AI tăng cường chi tiết">
+                          <Sparkles className="w-2.5 h-2.5" />
+                          <span>AI+</span>
+                        </span>
+                      )}
                     </div>
 
                     {/* Image status pill */}
-                    <div className="absolute top-2 right-2">
+                    <div className="absolute top-2 right-2 flex items-center gap-1">
+                      {cam.image_quality && (
+                        <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold backdrop-blur-md ${
+                          cam.image_quality.quality_status === "HIGH_QUALITY" || cam.image_quality.quality_status === "ACCEPTABLE"
+                            ? "bg-slate-900/60 text-slate-200"
+                            : "bg-amber-500/85 text-white"
+                        }`}>
+                          {cam.image_quality.quality_status === "HIGH_QUALITY" ? "Chuẩn" :
+                           cam.image_quality.quality_status === "ACCEPTABLE" ? "Ổn" : "Kém"}
+                        </span>
+                      )}
                       <span
                         className={`px-2 py-0.5 rounded-full text-[10px] font-bold backdrop-blur-md ${
                           cam.has_image

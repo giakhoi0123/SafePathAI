@@ -88,6 +88,16 @@ export const MapContainer: React.FC<MapContainerProps> = ({
   const cameraPreferenceSetRef = useRef(false);
   const [styleVersion, setStyleVersion] = useState(0);
   const [mapError, setMapError] = useState(false);
+  const [debugStats, setDebugStats] = useState<{
+    apiTotal: number;
+    validCoords: number;
+    filterMode: CameraFilterMode;
+    sourceFeatures: number;
+    renderedPoints: number;
+    renderedClusters: number;
+    zoom: number;
+    layerVisible: boolean;
+  } | null>(null);
 
   callbacksRef.current = { onMapClickCoordinates, onSelectCamera, onSelectRoute };
   dataRef.current = {
@@ -117,49 +127,90 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     }
   }, [recommendedRoute?.route_id, onToggleCameras]);
 
+  const updateCameras = useCallback((overrideFilter?: CameraFilterMode, overrideShowCameras?: boolean) => {
+    const map = mapRef.current;
+    const { cameras: all, recommendedRoute: route } = dataRef.current;
+    const visible = overrideShowCameras !== undefined ? overrideShowCameras : dataRef.current.showCameras;
+    const filter = overrideFilter !== undefined ? overrideFilter : dataRef.current.cameraFilter;
+
+    if (!map?.getSource("camera-source")) return;
+    if (!visible) {
+      setSource(map, "camera-source", empty());
+      if (containerRef.current) containerRef.current.dataset.cameraFeatureCount = "0";
+      if (process.env.NODE_ENV !== "production") {
+        setDebugStats({
+          apiTotal: all.length,
+          validCoords: all.filter((c) => Number.isFinite(c.lng) && Number.isFinite(c.lat)).length,
+          filterMode: filter,
+          sourceFeatures: 0,
+          renderedPoints: 0,
+          renderedClusters: 0,
+          zoom: parseFloat(map.getZoom().toFixed(2)),
+          layerVisible: false,
+        });
+      }
+      return;
+    }
+
+    const routeCoords = route?.geojson_path?.coordinates as number[][] | undefined;
+    const validCams = all.filter((cam) => Number.isFinite(cam.lng) && Number.isFinite(cam.lat));
+
+    const filtered = validCams.filter((cam) => {
+      if (filter === "ON_ROUTE") {
+        if (!routeCoords || routeCoords.length < 2) return false;
+        return cameraNearRoute(cam.lng, cam.lat, routeCoords);
+      }
+      if (filter === "HAS_IMAGE") return Boolean(cam.has_image);
+      return true;
+    });
+
+    const features: GeoJSON.Feature[] = filtered.map((cam) => {
+      const onRoute = routeCoords ? cameraNearRoute(cam.lng, cam.lat, routeCoords) : false;
+      return {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [cam.lng, cam.lat] },
+        properties: {
+          id: cam.cam_id,
+          label: cam.code || cam.name || "Camera",
+          onRoute: onRoute ? 1 : 0,
+          hasImage: cam.has_image ? 1 : 0,
+        },
+      };
+    });
+
+    setSource(map, "camera-source", { type: "FeatureCollection", features });
+    if (containerRef.current) containerRef.current.dataset.cameraFeatureCount = String(features.length);
+
+    if (process.env.NODE_ENV !== "production") {
+      let renderedPoints = 0;
+      let renderedClusters = 0;
+      try {
+        renderedPoints = map.queryRenderedFeatures(undefined, { layers: ["camera-points"] }).length;
+        renderedClusters = map.queryRenderedFeatures(undefined, { layers: ["camera-clusters"] }).length;
+      } catch {
+        // Query may fail before style load
+      }
+      setDebugStats({
+        apiTotal: all.length,
+        validCoords: validCams.length,
+        filterMode: filter,
+        sourceFeatures: features.length,
+        renderedPoints,
+        renderedClusters,
+        zoom: parseFloat(map.getZoom().toFixed(2)),
+        layerVisible: true,
+      });
+    }
+  }, []);
+
   const handleToggleCameras = useCallback(() => {
     cameraPreferenceSetRef.current = true;
     const nextVal = !showCameras;
     setInternalShowCameras(nextVal);
     sessionStorage.setItem("safepath.showCameras", String(nextVal));
     onToggleCameras?.(nextVal);
-  }, [showCameras, onToggleCameras]);
-
-  const updateCameras = useCallback(() => {
-    const map = mapRef.current;
-    const { cameras: all, recommendedRoute: route, showCameras: visible, cameraFilter: filter } = dataRef.current;
-    if (!map?.getSource("camera-source")) return;
-    if (!visible || map.getZoom() < 10) {
-      setSource(map, "camera-source", empty());
-      if (containerRef.current) containerRef.current.dataset.cameraFeatureCount = "0";
-      return;
-    }
-    const bounds = map.getBounds();
-    const routeCoords = route?.geojson_path?.coordinates as number[][] | undefined;
-    const inBounds = all.filter((cam) => Number.isFinite(cam.lng) && Number.isFinite(cam.lat) && bounds.contains([cam.lng, cam.lat]));
-
-    const filtered = inBounds.filter((cam) => {
-      if (filter === "ON_ROUTE") return cameraNearRoute(cam.lng, cam.lat, routeCoords);
-      if (filter === "HAS_IMAGE") return Boolean(cam.has_image);
-      return true;
-    });
-
-    const features: GeoJSON.Feature[] = filtered.map((cam) => {
-      const onRoute = cameraNearRoute(cam.lng, cam.lat, routeCoords);
-      return {
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [cam.lng, cam.lat] },
-        properties: {
-          id: cam.cam_id,
-          label: cam.code || "Camera",
-          onRoute: onRoute ? 1 : 0,
-          hasImage: cam.has_image ? 1 : 0,
-        },
-      };
-    });
-    setSource(map, "camera-source", { type: "FeatureCollection", features });
-    if (containerRef.current) containerRef.current.dataset.cameraFeatureCount = String(features.length);
-  }, []);
+    updateCameras(undefined, nextVal);
+  }, [showCameras, onToggleCameras, updateCameras]);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -203,7 +254,11 @@ export const MapContainer: React.FC<MapContainerProps> = ({
         type: "symbol",
         source: "camera-source",
         filter: ["has", "point_count"],
-        layout: { "text-field": ["get", "point_count_abbreviated"], "text-size": 11 },
+        layout: {
+          "text-field": ["get", "point_count_abbreviated"],
+          "text-font": ["Noto Sans Bold"],
+          "text-size": 11,
+        },
         paint: { "text-color": "#FFFFFF" },
       });
       map.addLayer({
@@ -232,7 +287,13 @@ export const MapContainer: React.FC<MapContainerProps> = ({
         source: "camera-source",
         filter: ["!", ["has", "point_count"]],
         minzoom: 14,
-        layout: { "text-field": ["get", "label"], "text-size": 10, "text-offset": [0, 1.4], "text-optional": true },
+        layout: {
+          "text-field": ["get", "label"],
+          "text-font": ["Noto Sans Regular"],
+          "text-size": 10,
+          "text-offset": [0, 1.4],
+          "text-optional": true,
+        },
         paint: { "text-color": "#15233D", "text-halo-color": "#FFFFFF", "text-halo-width": 2 },
       });
 
@@ -282,8 +343,42 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     };
 
     const onMapClick = (e: maplibregl.MapMouseEvent) => {
-      if (dataRef.current.mapSelectionMode === "NONE") return;
-      callbacksRef.current.onMapClickCoordinates({ lat: e.lngLat.lat, lng: e.lngLat.lng });
+      if (dataRef.current.mapSelectionMode !== "NONE") {
+        callbacksRef.current.onMapClickCoordinates({ lat: e.lngLat.lat, lng: e.lngLat.lng });
+        return;
+      }
+      if (dataRef.current.showCameras) {
+        const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
+          [e.point.x - 10, e.point.y - 10],
+          [e.point.x + 10, e.point.y + 10],
+        ];
+        if (map.getLayer("camera-points")) {
+          const pointFeatures = map.queryRenderedFeatures(bbox, { layers: ["camera-points"] });
+          if (pointFeatures.length > 0) {
+            const id = pointFeatures[0].properties?.id;
+            const camera = dataRef.current.cameras.find((c) => c.cam_id === id);
+            if (camera) {
+              callbacksRef.current.onSelectCamera(camera);
+              return;
+            }
+          }
+        }
+        if (map.getLayer("camera-clusters")) {
+          const clusterFeatures = map.queryRenderedFeatures(bbox, { layers: ["camera-clusters"] });
+          if (clusterFeatures.length > 0) {
+            const clusterId = clusterFeatures[0].properties?.cluster_id;
+            const source = map.getSource("camera-source") as maplibregl.GeoJSONSource | undefined;
+            if (source && clusterId !== undefined) {
+              source.getClusterExpansionZoom(clusterId).then((zoom) => {
+                if (zoom === null || zoom === undefined) return;
+                const coords = (clusterFeatures[0].geometry as GeoJSON.Point).coordinates;
+                map.easeTo({ center: [coords[0], coords[1]], zoom: zoom + 1 });
+              }).catch(() => {});
+              return;
+            }
+          }
+        }
+      }
     };
 
     const onCameraClick = (e: maplibregl.MapLayerMouseEvent) => {
@@ -302,11 +397,33 @@ export const MapContainer: React.FC<MapContainerProps> = ({
 
     const onIdle = () => {
       if (map.areTilesLoaded() && containerRef.current) containerRef.current.dataset.tilesReady = "true";
+      if (process.env.NODE_ENV !== "production") {
+        try {
+          if (map.getLayer("camera-points") && map.getLayer("camera-clusters")) {
+            const renderedPoints = map.queryRenderedFeatures(undefined, { layers: ["camera-points"] }).length;
+            const renderedClusters = map.queryRenderedFeatures(undefined, { layers: ["camera-clusters"] }).length;
+            setDebugStats((prev) => prev ? { ...prev, renderedPoints, renderedClusters } : null);
+          }
+        } catch {}
+      }
     };
 
     const onMoveEnd = () => {
-      updateCameras();
       if (containerRef.current) containerRef.current.dataset.mapZoom = map.getZoom().toFixed(3);
+      if (process.env.NODE_ENV !== "production") {
+        try {
+          if (map.getLayer("camera-points") && map.getLayer("camera-clusters")) {
+            const renderedPoints = map.queryRenderedFeatures(undefined, { layers: ["camera-points"] }).length;
+            const renderedClusters = map.queryRenderedFeatures(undefined, { layers: ["camera-clusters"] }).length;
+            setDebugStats((prev) => prev ? {
+              ...prev,
+              renderedPoints,
+              renderedClusters,
+              zoom: parseFloat(map.getZoom().toFixed(2)),
+            } : null);
+          }
+        } catch {}
+      }
     };
 
     const setCursorPointer = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = "pointer"; };
@@ -425,7 +542,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
 
   useEffect(() => {
     updateCameras();
-  }, [cameras, showCameras, updateCameras, styleVersion]);
+  }, [cameras, showCameras, cameraFilter, updateCameras, styleVersion]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -478,8 +595,8 @@ export const MapContainer: React.FC<MapContainerProps> = ({
         </div>
       )}
 
-      {/* Floating Liquid Glass Controls: Floating Camera Toggle (No right-side "Vị trí của tôi" button) */}
-      <div className="absolute top-3.5 right-14 z-10 flex items-center gap-2">
+      {/* Floating Liquid Glass Controls: Floating Camera Toggle */}
+      <div className="absolute top-3.5 right-14 z-10 flex flex-col items-end gap-2">
         <GlassToggle
           checked={showCameras}
           onChange={handleToggleCameras}
@@ -487,14 +604,50 @@ export const MapContainer: React.FC<MapContainerProps> = ({
           filter={cameraFilter}
           onFilterChange={(f) => {
             setCameraFilter(f);
-            updateCameras();
+            updateCameras(f);
           }}
           cameraCount={{
-            active: cameras.filter((c) => Number.isFinite(c.lng) && Number.isFinite(c.lat)).length,
+            active: cameras.filter((c) => {
+              if (!Number.isFinite(c.lng) || !Number.isFinite(c.lat)) return false;
+              if (cameraFilter === "HAS_IMAGE") return Boolean(c.has_image);
+              if (cameraFilter === "ON_ROUTE") {
+                const routeCoords = recommendedRoute?.geojson_path?.coordinates as number[][] | undefined;
+                return routeCoords ? cameraNearRoute(c.lng, c.lat, routeCoords) : false;
+              }
+              return true;
+            }).length,
             total: cameras.length,
           }}
         />
+
+        {showCameras && cameraFilter === "ON_ROUTE" && !recommendedRoute && (
+          <div className="rounded-xl glass-panel px-3 py-1.5 text-[11px] font-medium text-amber-900 border border-amber-200/90 shadow-glass flex items-center gap-1.5 animate-fadeIn backdrop-blur-md">
+            <span>Chưa có lộ trình: Vui lòng tìm đường để lọc camera trên tuyến</span>
+          </div>
+        )}
       </div>
+
+      {/* Dev-only Debug Panel for MapLibre Telemetry */}
+      {process.env.NODE_ENV !== "production" && debugStats && (
+        <div
+          data-testid="camera-debug-panel"
+          className="absolute bottom-6 left-3 z-20 rounded-2xl glass-panel p-2.5 text-[10px] text-ink-800 border border-indigo-200/80 shadow-glass backdrop-blur-md max-w-xs space-y-1 select-none pointer-events-none"
+        >
+          <div className="font-bold text-indigo-700 flex items-center justify-between border-b border-indigo-100 pb-1">
+            <span>MapLibre Camera Telemetry</span>
+            <span className="font-mono text-[9px] bg-indigo-100 px-1 rounded">{debugStats.filterMode}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 font-mono text-[9px]">
+            <div>API Total: <strong>{debugStats.apiTotal}</strong></div>
+            <div>Valid GPS: <strong>{debugStats.validCoords}</strong></div>
+            <div>GeoJSON Feat: <strong>{debugStats.sourceFeatures}</strong></div>
+            <div>Map Zoom: <strong>{debugStats.zoom}</strong></div>
+            <div>Render Pts: <strong>{debugStats.renderedPoints}</strong></div>
+            <div>Clusters: <strong>{debugStats.renderedClusters}</strong></div>
+            <div>Visible: <strong className={debugStats.layerVisible ? "text-emerald-600" : "text-rose-600"}>{debugStats.layerVisible ? "YES" : "NO"}</strong></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -108,6 +108,11 @@ export default function SafePathDashboard() {
     refreshWeatherTide();
     fetchHealth().then((h) => setBackendHealth(h.status || "offline"));
 
+    const intervalId = window.setInterval(() => {
+      refreshCameras();
+      refreshWeatherTide();
+    }, 30000);
+
     // Connect to WebSocket alerts with deduplication and exponential backoff
     const disconnectWs = connectAlertsWebSocket(
       (msg: WebSocketAlertMessage) => {
@@ -121,6 +126,7 @@ export default function SafePathDashboard() {
     );
 
     return () => {
+      window.clearInterval(intervalId);
       disconnectWs();
     };
   }, [refreshCameras, refreshWeatherTide]);
@@ -447,11 +453,15 @@ export default function SafePathDashboard() {
           >
             {user ? (
               <>
-                <img
-                  src={user.avatar}
-                  alt={user.name}
-                  className="w-5 h-5 rounded-full border border-indigo-200 object-cover"
-                />
+                {user.avatar ? (
+                  <img
+                    src={user.avatar}
+                    alt={user.name}
+                    className="w-5 h-5 rounded-full border border-indigo-200 object-cover"
+                  />
+                ) : (
+                  <User className="w-4 h-4 text-indigo-600" />
+                )}
                 <span className="hidden sm:inline max-w-[90px] truncate">{user.name}</span>
               </>
             ) : (

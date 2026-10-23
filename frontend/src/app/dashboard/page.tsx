@@ -23,7 +23,7 @@ import {
 import { GlassCard, GlassBadge, GlassButton, GlassInput } from "../../components/Glass";
 
 export default function UserDashboardPage() {
-  const { user, loginDemo, savePlace, removeSavedPlace } = useAuth();
+  const { user, isAuthenticated, loginWithGoogle, savePlace, removeSavedPlace } = useAuth();
   const [reportRoad, setReportRoad] = useState("");
   const [reportDistrict, setReportDistrict] = useState("Quận 1");
   const [reportDesc, setReportDesc] = useState("");
@@ -51,6 +51,7 @@ export default function UserDashboardPage() {
     savePlace({
       label: newPlaceLabel,
       name: newPlaceName,
+      address: newPlaceName,
       lat: 10.7769,
       lng: 106.7009,
     });
@@ -145,10 +146,12 @@ export default function UserDashboardPage() {
                 : "Bạn đang sử dụng hồ sơ khách. Đăng nhập để lưu địa điểm yêu thích và lịch sử tuyến."}
             </p>
           </div>
-          {!user && (
-            <GlassButton variant="primary" onClick={loginDemo}>
-              Đăng nhập tài khoản
-            </GlassButton>
+          {!isAuthenticated && (
+            <Link href="/account">
+              <GlassButton variant="primary">
+                Đăng nhập tài khoản
+              </GlassButton>
+            </Link>
           )}
         </div>
 
@@ -263,48 +266,41 @@ export default function UserDashboardPage() {
               </div>
 
               <div className="space-y-2">
-                {(user?.history || [
-                  {
-                    id: "h_1",
-                    originName: "Chợ Bến Thành (Quận 1)",
-                    destName: "Ngã tư Hàng Xanh (Bình Thạnh)",
-                    distanceKm: 4.5,
-                    durationMins: 12.0,
-                    timestamp: new Date().toISOString(),
-                  },
-                  {
-                    id: "h_2",
-                    originName: "Sân bay Tân Sơn Nhất",
-                    destName: "Chợ Bến Thành",
-                    distanceKm: 7.2,
-                    durationMins: 19.5,
-                    timestamp: new Date(Date.now() - 86400000).toISOString(),
-                  },
-                ]).map((hist) => (
-                  <div
-                    key={hist.id}
-                    className="p-3 rounded-2xl bg-white/70 border border-slate-200/70 shadow-glass-sm flex items-center justify-between gap-3 text-xs"
-                  >
-                    <div className="space-y-0.5">
-                      <div className="font-bold text-ink-950 flex items-center gap-1.5">
-                        <span>{hist.originName}</span>
-                        <ArrowRight className="w-3 h-3 text-ink-400" />
-                        <span>{hist.destName}</span>
-                      </div>
-                      <div className="text-[10px] text-ink-400 font-mono">
-                        {hist.distanceKm} km · {hist.durationMins.toFixed(0)} phút ·{" "}
-                        {new Date(hist.timestamp).toLocaleDateString("vi-VN")}
-                      </div>
-                    </div>
-
-                    <Link
-                      href="/"
-                      className="px-3 py-1.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition"
-                    >
-                      Đi lại
-                    </Link>
+                {!isAuthenticated ? (
+                  <div className="p-3 text-center text-xs text-ink-400">
+                    Bạn đang ở chế độ khách. Đăng nhập để xem lịch sử lộ trình cá nhân.
                   </div>
-                ))}
+                ) : user?.history && user.history.length > 0 ? (
+                  user.history.map((hist) => (
+                    <div
+                      key={hist.id}
+                      className="p-3 rounded-2xl bg-white/70 border border-slate-200/70 shadow-glass-sm flex items-center justify-between gap-3 text-xs"
+                    >
+                      <div className="space-y-0.5">
+                        <div className="font-bold text-ink-950 flex items-center gap-1.5">
+                          <span>{hist.originName}</span>
+                          <ArrowRight className="w-3 h-3 text-ink-400" />
+                          <span>{hist.destName}</span>
+                        </div>
+                        <div className="text-[10px] text-ink-400 font-mono">
+                          {hist.distanceKm.toFixed(1)} km · {Math.round(hist.durationMins)} phút ·{" "}
+                          {new Date(hist.timestamp).toLocaleDateString("vi-VN")}
+                        </div>
+                      </div>
+
+                      <Link
+                        href="/"
+                        className="px-3 py-1.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition"
+                      >
+                        Đi lại
+                      </Link>
+                    </div>
+                  ))
+                ) : (
+                  <div className="p-3 text-center text-xs text-ink-400">
+                    Chưa có lịch sử chuyến đi nào được ghi nhận.
+                  </div>
+                )}
               </div>
             </GlassCard>
           </div>

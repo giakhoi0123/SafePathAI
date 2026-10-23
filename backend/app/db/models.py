@@ -155,6 +155,36 @@ class TrafficCamera(Base):
         )
 
 
+class CameraIngestionState(Base):
+    """
+    Persistent state tracking for Camera Ingestion Scheduler.
+    Records per-camera attempt history, exponential backoff, validation provenance,
+    and HTTP status codes to prevent starvation and ensure fair round-robin scheduling.
+    """
+    __tablename__ = "camera_ingestion_state"
+
+    cam_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("traffic_cameras.cam_id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+    source_status: Mapped[str] = mapped_column(String(32), default="PENDING", index=True)
+    last_attempt_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_success_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_captured_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_retrieved_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0)
+    http_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    validation_status: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    image_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    image_width: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    image_height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    model_status: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<CameraIngestionState({self.cam_id}, status={self.source_status}, retries={self.failure_count})>"
+
+
 class HistoricalFloodPoint(Base):
     """
     Represents a verified municipal historical flood observation point in TP.HCM.
@@ -182,6 +212,94 @@ class HistoricalFloodPoint(Base):
 
     def __repr__(self) -> str:
         return f"<HistoricalFloodPoint({self.id}, {self.street_name}, {self.cause})>"
+
+
+class User(Base):
+    """
+    User account model supporting Google OAuth authentication.
+    Stores stable provider identity, profile details, and account state.
+    """
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    provider: Mapped[str] = mapped_column(String(32), default="google", nullable=False)
+    provider_account_id: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+    email: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    avatar_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    preference: Mapped[Optional["UserPreference"]] = relationship(
+        "UserPreference", back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
+    saved_places: Mapped[List["UserSavedPlace"]] = relationship(
+        "UserSavedPlace", back_populates="user", cascade="all, delete-orphan", order_by="UserSavedPlace.created_at.desc()"
+    )
+    route_history: Mapped[List["UserRouteHistory"]] = relationship(
+        "UserRouteHistory", back_populates="user", cascade="all, delete-orphan", order_by="UserRouteHistory.created_at.desc()"
+    )
+
+    def __repr__(self) -> str:
+        return f"<User(id='{self.id}', email='{self.email}', display_name='{self.display_name}')>"
+
+
+class UserPreference(Base):
+    """User routing, flood avoidance, and notification preferences."""
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    transport_mode: Mapped[str] = mapped_column(String(32), default="motorcycle", nullable=False)
+    avoid_flood_level: Mapped[str] = mapped_column(String(32), default="MEDIUM", nullable=False)
+    avoid_high_density: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    alert_notifications: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    voice_guidance_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    updated_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship("User", back_populates="preference")
+
+
+class UserSavedPlace(Base):
+    """User favorite / bookmarked locations."""
+    __tablename__ = "user_saved_places"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    user_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    address: Mapped[str] = mapped_column(String(512), nullable=False)
+    lat: Mapped[float] = mapped_column(Float, nullable=False)
+    lng: Mapped[float] = mapped_column(Float, nullable=False)
+    category: Mapped[str] = mapped_column(String(32), default="favorite", nullable=False)
+    created_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship("User", back_populates="saved_places")
+
+
+class UserRouteHistory(Base):
+    """User completed or searched route history."""
+    __tablename__ = "user_route_history"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    user_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    origin_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    dest_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    origin_lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    origin_lng: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    dest_lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    dest_lng: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    distance_km: Mapped[float] = mapped_column(Float, nullable=False)
+    duration_mins: Mapped[int] = mapped_column(Integer, nullable=False)
+    travel_mode: Mapped[str] = mapped_column(String(32), default="motorcycle", nullable=False)
+    created_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    user: Mapped["User"] = relationship("User", back_populates="route_history")
 
 
 # PostGIS Spatial CTE Query for finding the nearest road segment within a given radius in meters

@@ -8,24 +8,65 @@ import {
   ArrowLeft,
   Bike,
   Car,
-  Bell,
-  ShieldCheck,
   CheckCircle,
   AlertCircle,
   Key,
   LogOut,
   LogIn,
+  MapPin,
+  Clock,
+  Trash2,
+  Plus,
+  Shield,
+  ShieldAlert,
 } from "lucide-react";
 import { GlassCard, GlassButton, GlassBadge } from "../../components/Glass";
 
 export default function AccountPage() {
-  const { user, isConfigured, loginWithGoogle, loginDemo, logout, updateVehicle } = useAuth();
-  const [saveToast, setSaveToast] = useState(false);
+  const {
+    user,
+    isAuthenticated,
+    isConfigured,
+    oauthStatus,
+    loginWithGoogle,
+    logout,
+    updateVehicle,
+    savePlace,
+    removeSavedPlace,
+  } = useAuth();
 
-  const handleVehicleChange = (v: "motorcycle" | "car") => {
-    updateVehicle(v);
-    setSaveToast(true);
-    setTimeout(() => setSaveToast(false), 2000);
+  const [saveToast, setSaveToast] = useState<string | null>(null);
+  const [showAddPlace, setShowAddPlace] = useState(false);
+  const [newPlaceName, setNewPlaceName] = useState("");
+  const [newPlaceAddress, setNewPlaceAddress] = useState("");
+  const [newPlaceCategory, setNewPlaceCategory] = useState("favorite");
+
+  const handleVehicleChange = async (v: "motorcycle" | "car") => {
+    if (!isAuthenticated) {
+      setSaveToast("Vui lòng đăng nhập để lưu phương tiện mặc định vào tài khoản.");
+      setTimeout(() => setSaveToast(null), 3000);
+      return;
+    }
+    await updateVehicle(v);
+    setSaveToast("Đã cập nhật phương tiện di chuyển chính vào cơ sở dữ liệu!");
+    setTimeout(() => setSaveToast(null), 3000);
+  };
+
+  const handleAddPlaceSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newPlaceName.trim() || !newPlaceAddress.trim()) return;
+    await savePlace({
+      name: newPlaceName.trim(),
+      address: newPlaceAddress.trim(),
+      lat: 10.7769,
+      lng: 106.7009,
+      label: newPlaceCategory,
+    });
+    setNewPlaceName("");
+    setNewPlaceAddress("");
+    setShowAddPlace(false);
+    setSaveToast("Đã lưu địa điểm mới thành công!");
+    setTimeout(() => setSaveToast(null), 3000);
   };
 
   return (
@@ -53,7 +94,7 @@ export default function AccountPage() {
                 Tài khoản & Cài đặt <span className="aurora-gradient-text">SafePathAI</span>
               </h1>
               <p className="text-[11px] text-ink-500 leading-none mt-0.5">
-                Phương tiện di chuyển, cảnh báo & Xác thực
+                Xác thực Google, phương tiện & địa điểm lưu trữ
               </p>
             </div>
           </div>
@@ -93,7 +134,23 @@ export default function AccountPage() {
         {saveToast && (
           <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-2xl text-emerald-800 text-xs font-bold flex items-center gap-2 shadow-sm animate-fadeIn">
             <CheckCircle className="w-4 h-4 text-emerald-600" />
-            <span>Đã cập nhật cài đặt thành công!</span>
+            <span>{saveToast}</span>
+          </div>
+        )}
+
+        {/* Configuration Warning Banner if OAuth credentials are not provided */}
+        {oauthStatus === "BLOCKED_CONFIGURATION" && (
+          <div className="p-4 bg-amber-50/90 border border-amber-300 rounded-3xl shadow-glass flex items-start gap-3 text-xs text-amber-900">
+            <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="font-bold text-amber-950 flex items-center gap-2">
+                <span>Google OAuth: Trạng thái BLOCKED_CONFIGURATION</span>
+                <GlassBadge variant="amber" size="sm">Thiếu biến môi trường</GlassBadge>
+              </div>
+              <p className="text-[11px] leading-relaxed text-amber-800">
+                Máy chủ chưa thiết lập biến môi trường <code className="bg-amber-100 px-1 py-0.5 rounded font-mono font-bold">AUTH_GOOGLE_ID</code> và <code className="bg-amber-100 px-1 py-0.5 rounded font-mono font-bold">AUTH_GOOGLE_SECRET</code>. Theo nguyên tắc Zero-Mock, hệ thống giữ nguyên trạng thái khách (Guest) và không giả lập phiên đăng nhập giả.
+              </p>
+            </div>
           </div>
         )}
 
@@ -101,41 +158,48 @@ export default function AccountPage() {
         <GlassCard variant="elevated" className="space-y-4">
           <div className="flex flex-col sm:flex-row items-center gap-4 justify-between">
             <div className="flex items-center gap-4">
-              <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-indigo-200 shadow-glass">
-                <img
-                  src={
-                    user?.avatar ||
-                    "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80"
-                  }
-                  alt="Avatar"
-                  className="w-full h-full object-cover"
-                />
+              <div className="w-16 h-16 rounded-full overflow-hidden border-2 border-indigo-200 shadow-glass bg-indigo-50 flex items-center justify-center shrink-0">
+                {user?.avatar ? (
+                  <img
+                    src={user.avatar}
+                    alt={user.name}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <User className="w-8 h-8 text-indigo-400" />
+                )}
               </div>
               <div>
                 <h3 className="text-base font-black text-ink-950">
-                  {user ? user.name : "Khách vãng lai"}
+                  {isAuthenticated && user ? user.name : "Bạn chưa đăng nhập"}
                 </h3>
                 <p className="text-xs text-ink-500">
-                  {user ? user.email : "Chưa đăng nhập tài khoản"}
+                  {isAuthenticated && user ? user.email : "Đăng nhập Google để lưu địa điểm và lịch sử tuyến đường"}
                 </p>
                 <div className="mt-1 flex items-center gap-2">
-                  <GlassBadge variant={user ? "emerald" : "slate"} size="sm">
-                    {user ? "Đã đăng nhập" : "Khách"}
+                  <GlassBadge variant={isAuthenticated ? "emerald" : "slate"} size="sm">
+                    {isAuthenticated ? "Đã xác thực Google" : "Khách (Chưa đăng nhập)"}
                   </GlassBadge>
                 </div>
               </div>
             </div>
 
             <div>
-              {user ? (
+              {isAuthenticated ? (
                 <GlassButton variant="danger" size="sm" onClick={logout}>
                   <LogOut className="w-3.5 h-3.5 mr-1.5" />
                   <span>Đăng xuất</span>
                 </GlassButton>
               ) : (
-                <GlassButton variant="primary" size="md" onClick={loginWithGoogle}>
+                <GlassButton
+                  variant="primary"
+                  size="md"
+                  onClick={loginWithGoogle}
+                  disabled={!isConfigured}
+                  title={!isConfigured ? "Cần cấu hình AUTH_GOOGLE_ID và AUTH_GOOGLE_SECRET" : "Đăng nhập bằng tài khoản Google"}
+                >
                   <LogIn className="w-4 h-4 mr-1.5" />
-                  <span>Đăng nhập với Google</span>
+                  <span>Tiếp tục với Google</span>
                 </GlassButton>
               )}
             </div>
@@ -150,7 +214,7 @@ export default function AccountPage() {
               <span>Phương tiện di chuyển chính</span>
             </h4>
             <p className="text-xs text-ink-500 mt-1">
-              Hệ thống SafePathAI điều chỉnh ngưỡng cảnh báo ngập nước dựa trên chiều cao gầm xe của bạn.
+              Hệ thống SafePathAI điều chỉnh ngưỡng cảnh báo ngập nước dựa trên độ cao gầm xe của bạn.
             </p>
           </div>
 
@@ -207,6 +271,139 @@ export default function AccountPage() {
           </div>
         </GlassCard>
 
+        {/* Saved Places Card */}
+        <GlassCard variant="elevated" className="space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-200/70 pb-3">
+            <div>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-ink-800 flex items-center gap-2">
+                <MapPin className="w-4 h-4 text-emerald-600" />
+                <span>Địa điểm đã lưu ({user?.savedPlaces?.length || 0})</span>
+              </h4>
+              <p className="text-xs text-ink-500 mt-1">
+                Lưu nhanh các vị trí thường đi để chọn tuyến chỉ với 1 chạm.
+              </p>
+            </div>
+            {isAuthenticated && (
+              <GlassButton
+                variant="secondary"
+                size="sm"
+                onClick={() => setShowAddPlace(!showAddPlace)}
+              >
+                <Plus className="w-3.5 h-3.5 mr-1" />
+                <span>{showAddPlace ? "Đóng" : "Thêm mới"}</span>
+              </GlassButton>
+            )}
+          </div>
+
+          {!isAuthenticated ? (
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-center text-xs text-ink-500">
+              Bạn đang ở chế độ khách. Hãy đăng nhập tài khoản để lưu các địa điểm yêu thích.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {showAddPlace && (
+                <form onSubmit={handleAddPlaceSubmit} className="p-3.5 bg-indigo-50/60 rounded-2xl border border-indigo-200/80 space-y-3">
+                  <div className="font-bold text-xs text-indigo-950">Thêm địa điểm yêu thích mới</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <input
+                      type="text"
+                      placeholder="Tên gợi nhớ (e.g. Nhà riêng, Cơ quan)"
+                      value={newPlaceName}
+                      onChange={(e) => setNewPlaceName(e.target.value)}
+                      className="px-3 py-1.5 rounded-xl border border-indigo-200 bg-white text-xs text-ink-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      required
+                    />
+                    <input
+                      type="text"
+                      placeholder="Địa chỉ cụ thể tại TP.HCM"
+                      value={newPlaceAddress}
+                      onChange={(e) => setNewPlaceAddress(e.target.value)}
+                      className="px-3 py-1.5 rounded-xl border border-indigo-200 bg-white text-xs text-ink-900 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                      required
+                    />
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <GlassButton type="button" variant="ghost" size="sm" onClick={() => setShowAddPlace(false)}>Hủy</GlassButton>
+                    <GlassButton type="submit" variant="primary" size="sm">Lưu địa điểm</GlassButton>
+                  </div>
+                </form>
+              )}
+
+              {user?.savedPlaces && user.savedPlaces.length > 0 ? (
+                <div className="divide-y divide-slate-100">
+                  {user.savedPlaces.map((sp) => (
+                    <div key={sp.id} className="py-2.5 flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600 border border-emerald-100">
+                          <MapPin className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold text-ink-950">{sp.name}</div>
+                          <div className="text-[11px] text-ink-500">{sp.address || sp.name}</div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => removeSavedPlace(sp.id)}
+                        className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50 transition"
+                        title="Xóa địa điểm"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-3 text-center text-xs text-ink-400">
+                  Chưa có địa điểm nào được lưu trong cơ sở dữ liệu.
+                </div>
+              )}
+            </div>
+          )}
+        </GlassCard>
+
+        {/* Route History Card */}
+        <GlassCard variant="elevated" className="space-y-4">
+          <div className="border-b border-slate-200/70 pb-3">
+            <h4 className="text-xs font-bold uppercase tracking-wider text-ink-800 flex items-center gap-2">
+              <Clock className="w-4 h-4 text-blue-600" />
+              <span>Lịch sử các tuyến đường đã tìm ({user?.history?.length || 0})</span>
+            </h4>
+            <p className="text-xs text-ink-500 mt-1">
+              Lưu trữ an toàn trên cơ sở dữ liệu PostgreSQL cho tài khoản đã xác thực.
+            </p>
+          </div>
+
+          {!isAuthenticated ? (
+            <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 text-center text-xs text-ink-500">
+              Bạn đang ở chế độ khách. Các tuyến đường tìm kiếm sẽ không được lưu vào tài khoản.
+            </div>
+          ) : user?.history && user.history.length > 0 ? (
+            <div className="divide-y divide-slate-100 max-h-60 overflow-y-auto">
+              {user.history.map((h) => (
+                <div key={h.id} className="py-2.5 flex items-center justify-between">
+                  <div className="space-y-0.5">
+                    <div className="text-xs font-bold text-ink-950 flex items-center gap-1.5">
+                      <span>{h.originName}</span>
+                      <span className="text-slate-400">→</span>
+                      <span>{h.destName}</span>
+                    </div>
+                    <div className="text-[10px] text-ink-400 font-mono">
+                      {h.distanceKm.toFixed(1)} km • ~{Math.round(h.durationMins)} phút • {new Date(h.timestamp).toLocaleDateString("vi-VN")}
+                    </div>
+                  </div>
+                  <GlassBadge variant="indigo" size="sm">
+                    {Math.round(h.durationMins)}p
+                  </GlassBadge>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-3 text-center text-xs text-ink-400">
+              Chưa có lịch sử lộ trình nào.
+            </div>
+          )}
+        </GlassCard>
+
         {/* OAuth 2.0 Security & Integration Info */}
         <GlassCard variant="elevated" className="space-y-3">
           <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider text-ink-800 border-b border-slate-200/70 pb-3">
@@ -223,8 +420,8 @@ export default function AccountPage() {
             </div>
             <p className="text-[11px] text-ink-500 leading-relaxed">
               {isConfigured
-                ? "Khóa Google Client ID đã được nhận diện. Bạn có thể đăng nhập trực tiếp bằng tài khoản Google."
-                : "Chưa cấu hình NEXT_PUBLIC_GOOGLE_CLIENT_ID trong môi trường triển khai. Hệ thống chuyển sang hồ sơ người dùng mẫu an toàn mà không làm gián đoạn trải nghiệm."}
+                ? "Khóa Google Client ID & Secret đã được nhận diện. Bạn có thể đăng nhập trực tiếp bằng tài khoản Google."
+                : "Chưa cấu hình AUTH_GOOGLE_ID và AUTH_GOOGLE_SECRET trong file môi trường (.env / .env.local). Hệ thống giữ trạng thái khách, không dùng tài khoản giả lập."}
             </p>
           </div>
         </GlassCard>
@@ -232,4 +429,3 @@ export default function AccountPage() {
     </div>
   );
 }
-

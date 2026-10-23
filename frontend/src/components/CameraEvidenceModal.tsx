@@ -9,7 +9,7 @@ import {
   ImageAccessStatus,
   RiskLevel,
 } from "../types/contracts";
-import { fetchCameraMetadata, getCameraImageUrl } from "../services/api";
+import { fetchCameraMetadata, getCameraImageUrl, getCameraEnhancedImageUrl } from "../services/api";
 import {
   X,
   AlertTriangle,
@@ -28,6 +28,7 @@ import {
   RefreshCw,
   ExternalLink,
   Lock,
+  Sparkles,
 } from "lucide-react";
 
 interface CameraEvidenceModalProps {
@@ -39,6 +40,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
   camera,
   onClose,
 }) => {
+  const [activeView, setActiveView] = useState<"original" | "enhanced">("original");
   const [imageError, setImageError] = useState(false);
   const [metadata, setMetadata] = useState<CameraImageMetadata | null>(null);
   const [, setIsLoadingMetadata] = useState(false);
@@ -217,7 +219,11 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
     setRefreshKey((k) => k + 1);
   };
 
-  const imageUrl = getCameraImageUrl(camera.cam_id);
+  const quality = metadata?.image_quality || camera.image_quality;
+  const currentImageUrl =
+    activeView === "enhanced"
+      ? getCameraEnhancedImageUrl(camera.cam_id)
+      : getCameraImageUrl(camera.cam_id);
 
   return (
     <div
@@ -275,6 +281,68 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
             </div>
           </div>
 
+          {/* View Toggle Tabs: Original vs Enhanced + Image Quality Badge */}
+          <div className="flex items-center justify-between flex-wrap gap-2 pt-1">
+            <div className="inline-flex p-1 bg-white/70 backdrop-blur-md rounded-2xl border border-white/90 shadow-glass-sm text-xs">
+              <button
+                type="button"
+                onClick={() => {
+                  setImageError(false);
+                  setActiveView("original");
+                }}
+                className={`px-3 py-1.5 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  activeView === "original"
+                    ? "bg-white text-indigo-700 shadow-sm border border-slate-200/80"
+                    : "text-ink-600 hover:text-ink-950"
+                }`}
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>Ảnh gốc (Nguồn)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setImageError(false);
+                  setActiveView("enhanced");
+                }}
+                className={`px-3 py-1.5 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  activeView === "enhanced"
+                    ? "bg-gradient-to-r from-indigo-600 via-indigo-500 to-sky-500 text-white shadow-sm"
+                    : "text-ink-600 hover:text-ink-950"
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Ảnh tăng cường (Hỗ trợ AI)</span>
+              </button>
+            </div>
+
+            {/* Image Quality Badge */}
+            {quality && (
+              <div className="flex items-center gap-1.5">
+                <span
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold border ${
+                    quality.quality_status === "HIGH_QUALITY"
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : quality.quality_status === "ACCEPTABLE"
+                      ? "bg-blue-50 text-blue-700 border-blue-200"
+                      : quality.quality_status === "POOR"
+                      ? "bg-amber-50 text-amber-700 border-amber-200"
+                      : "bg-rose-50 text-rose-700 border-rose-200"
+                  }`}
+                >
+                  Chất lượng:{" "}
+                  {quality.quality_status === "HIGH_QUALITY"
+                    ? "Cao"
+                    : quality.quality_status === "ACCEPTABLE"
+                    ? "Chấp nhận được"
+                    : quality.quality_status === "POOR"
+                    ? "Kém"
+                    : "Suy giảm"}
+                </span>
+              </div>
+            )}
+          </div>
+
           {/* Camera Image Frame */}
           <div className="relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 aspect-[4/3] flex items-center justify-center shadow-inner">
             {imageError ? (
@@ -321,9 +389,9 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
             ) : (
               <>
                 <img
-                  key={refreshKey}
-                  src={`${imageUrl}?t=${refreshKey}`}
-                  alt={`Camera snapshot ${camera.name}`}
+                  key={`${activeView}-${refreshKey}`}
+                  src={`${currentImageUrl}${currentImageUrl.includes("?") ? "&" : "?"}t=${refreshKey}`}
+                  alt={`Camera snapshot ${camera.name} (${activeView})`}
                   className="w-full h-full object-cover"
                   onError={() => setImageError(true)}
                 />
@@ -332,9 +400,11 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                 <div className="absolute top-3 left-3 glass-panel px-3 py-1.5 rounded-xl border border-white/90 text-[11px] text-ink-900 font-medium flex items-center gap-2 shadow-sm">
                   <div className={`w-2 h-2 rounded-full ${isModelAnalyzed ? "bg-emerald-500 animate-ping" : "bg-indigo-500"}`} />
                   <span>
-                    {isModelAnalyzed
-                      ? "Đã phân tích ONNX YOLOv5n • Cổng 8007 Sở GTVT"
-                      : "Snapshot thô • Cổng 8007 Sở GTVT (Chưa suy luận model)"}
+                    {activeView === "enhanced"
+                      ? "Ảnh xử lý tăng cường • Thích ứng sáng & chi tiết (Hỗ trợ AI)"
+                      : isModelAnalyzed
+                      ? "Ảnh gốc nguồn Sở GTVT • Đã phân tích ONNX"
+                      : "Ảnh gốc thô • Cổng 8007 Sở GTVT (Chưa suy luận model)"}
                   </span>
                 </div>
 
@@ -349,6 +419,66 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
               </>
             )}
           </div>
+
+          {/* Enhancement Notice & Quality Flags Bar */}
+          {activeView === "enhanced" ? (
+            <div className="p-3 rounded-2xl bg-indigo-50/80 border border-indigo-200/80 text-[11px] text-indigo-900 flex items-start gap-2 shadow-glass-sm">
+              <Sparkles className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+              <div>
+                <strong className="block text-indigo-950 font-bold">Chế độ tăng cường hình ảnh (AI Assistive Enhancement):</strong>
+                <p className="mt-0.5 text-indigo-800 leading-relaxed">
+                  Khung hình được tối ưu qua pipeline thích ứng: Cân chỉnh Gamma cho vùng tối/đêm, tăng cường tương phản cục bộ CLAHE trên kênh L, giảm nhiễu biên và làm rõ viền chi tiết unsharp masking. <strong>Ảnh gốc luôn được giữ nguyên và bảo lưu làm nguồn bằng chứng pháp lý độc lập.</strong>
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="p-2.5 rounded-2xl bg-white/60 border border-slate-200/70 text-[11px] text-ink-600 flex items-center justify-between flex-wrap gap-2">
+              <span className="text-ink-700">
+                Ảnh gốc được tiếp nhận nguyên bản từ camera giao thông TP.HCM.
+              </span>
+              {quality?.quality_flags && quality.quality_flags.length > 0 && (
+                <div className="flex items-center gap-1 flex-wrap">
+                  {quality.quality_flags.map((flag) => (
+                    <span
+                      key={flag}
+                      className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-slate-100 text-ink-700 border border-slate-200"
+                    >
+                      {flag === "LOW_LIGHT"
+                        ? "Thiếu sáng"
+                        : flag === "BLURRY"
+                        ? "Mờ nét"
+                        : flag === "NOISY"
+                        ? "Nhiễu hạt"
+                        : flag === "LOW_RESOLUTION"
+                        ? "Phân giải thấp"
+                        : flag === "PARTIAL_OCCLUSION"
+                        ? "Vật cản"
+                        : flag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Quality-Aware Fallback Notice when 0 vehicles detected on poor/degraded frames */}
+          {vehicleCountVal === 0 &&
+            (quality?.quality_status === "POOR" ||
+              quality?.quality_status === "DEGRADED" ||
+              quality?.quality_metrics?.is_low_quality ||
+              camera.image_status_reason === "POOR_QUALITY_INSUFFICIENT_EVIDENCE") && (
+              <div className="p-3.5 bg-amber-50/95 border border-amber-300 rounded-2xl text-xs text-amber-900 flex items-start gap-2.5 shadow-glass-sm animate-fadeIn">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="block text-amber-950 font-bold">
+                    0 phát hiện · Chất lượng ảnh hạn chế · Không đủ cơ sở kết luận mật độ giao thông
+                  </strong>
+                  <p className="text-[11px] text-amber-800 mt-1 leading-relaxed">
+                    Camera ở tình trạng thiếu sáng hoặc mất nét đáng kể. Theo nguyên tắc Zero-Mock và bảo đảm an toàn, hệ thống không kết luận đường vắng/an toàn mà giữ trạng thái <strong>CHƯA XÁC MINH (UNKNOWN)</strong>.
+                  </p>
+                </div>
+              </div>
+            )}
 
           {/* Computer Vision Metrics Dashboard (Truthful Null Rendering) */}
           <div className="grid grid-cols-3 gap-3">

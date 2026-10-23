@@ -161,8 +161,8 @@ async def _get_osrm_raw_routes(
     url = (f"{settings.OSRM_BASE_URL.rstrip('/')}/route/v1/driving/"
            f"{origin_lng},{origin_lat};{dest_lng},{dest_lat}")
     params = {"alternatives": "3", "steps": "true", "geometries": "geojson", "overview": "full"}
-    close_client = client is None
-    if client is None:
+    close_client = client is None or getattr(client, "is_closed", False)
+    if close_client:
         client = httpx.AsyncClient(timeout=8.0)
     try:
         response = await client.get(url, params=params)

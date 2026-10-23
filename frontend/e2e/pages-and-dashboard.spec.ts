@@ -3,7 +3,6 @@ import { test, expect } from "@playwright/test";
 test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", () => {
   test("Navbar links navigate to Monitor, Dashboard, and Account pages", async ({ page }) => {
     await page.goto("/");
-    await page.waitForLoadState("networkidle");
 
     // Check navbar brand and links
     await expect(page.locator("header")).toBeVisible();
@@ -37,7 +36,7 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
 
     // Verify Account page loaded
     await page.waitForURL("**/account");
-    await expect(page.locator("text=Hồ sơ Người dùng")).toBeVisible();
+    await expect(page.locator("text=Tài khoản & Cài đặt")).toBeVisible();
     await expect(page.locator("text=Phương tiện di chuyển chính")).toBeVisible();
 
     // Return to Map
@@ -50,7 +49,6 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
 
   test("Camera Monitor page lists real cameras, filters by district and search", async ({ page }) => {
     await page.goto("/monitor");
-    await page.waitForLoadState("networkidle");
 
     // Wait for cameras to finish loading from API
     const cameraGrid = page.locator("[data-testid='camera-monitor-grid']");
@@ -80,7 +78,6 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
 
   test("Dashboard displays saved places and allows submitting incident reports", async ({ page }) => {
     await page.goto("/dashboard");
-    await page.waitForLoadState("networkidle");
 
     // Check saved places section
     await expect(page.locator("text=Địa điểm yêu thích (1-Click tìm đường)")).toBeVisible();
@@ -101,18 +98,17 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
 
   test("Account page allows vehicle switching and shows OAuth configuration state", async ({ page }) => {
     await page.goto("/account");
-    await page.waitForLoadState("networkidle");
 
     // Check vehicle selector cards
     const carOption = page.locator("text=Ô tô (4 bánh)");
     await expect(carOption).toBeVisible();
     await carOption.click();
 
-    // Check success toast
-    await expect(page.locator("text=Đã cập nhật cài đặt thành công!")).toBeVisible();
+    // Check feedback toast
+    await expect(page.locator("text=Vui lòng đăng nhập để lưu phương tiện")).toBeVisible();
 
     // Check Google login section
-    const googleBtn = page.locator("button:has-text('Đăng nhập với Google')");
+    const googleBtn = page.locator("button:has-text('Tiếp tục với Google')");
     await expect(googleBtn).toBeVisible();
   });
 });

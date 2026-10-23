@@ -30,6 +30,39 @@ export enum EvidenceEligibility {
   NOT_VERIFIED_FOR_ROUTING = "NOT_VERIFIED_FOR_ROUTING",
 }
 
+export interface ImageQualityMetrics {
+  brightness_score: number;
+  blur_score: number;
+  noise_estimate: number;
+  resolution_score: number;
+  contrast_score: number;
+  is_low_light: boolean;
+  is_blurry: boolean;
+  is_low_quality: boolean;
+}
+
+export interface ImageQualityAssessment {
+  quality_status: string; // "HIGH_QUALITY", "ACCEPTABLE", "POOR", "DEGRADED"
+  quality_flags: string[]; // ["LOW_LIGHT", "LOW_RESOLUTION", "BLURRY", "NOISY", "PARTIAL_OCCLUSION"]
+  quality_metrics: ImageQualityMetrics;
+  enhancement_applied: boolean;
+  enhancement_mode?: string | null;
+  enhanced_image_url?: string | null;
+  super_resolution_status?: string | null;
+}
+
+export interface CameraSummary {
+  total_registered: number;
+  valid_gps_count: number;
+  checked_count: number;
+  valid_images_count: number;
+  stale_images_count: number;
+  unavailable_count: number;
+  analyzed_count: number;
+  last_scheduler_cycle: string | null;
+  circuit_breaker_open: boolean;
+}
+
 export interface CameraEvidence {
   cam_id: string;
   code?: string | null;
@@ -65,6 +98,10 @@ export interface CameraEvidence {
   vehicle_count?: number | null;
   traffic_density_score?: number | null; // 0.0 to 1.0, null when unanalyzed
   flood_ratio?: number | null; // 0.0 to 1.0, null when unanalyzed
+  image_quality?: ImageQualityAssessment | null;
+  enhanced_image_url?: string | null;
+  enhancement_applied?: boolean;
+  model_pipeline?: string | null;
   risk_level: RiskLevel;
   source_status: DataSourceStatus;
   updated_at: string;
@@ -91,6 +128,10 @@ export interface CameraImageMetadata {
   vehicle_count?: number | null;
   traffic_density_score?: number | null;
   flood_ratio?: number | null;
+  image_quality?: ImageQualityAssessment | null;
+  enhanced_image_url?: string | null;
+  enhancement_applied?: boolean;
+  model_pipeline?: string | null;
   etag?: string | null;
   content_length?: number | null;
   mime_type?: string | null;

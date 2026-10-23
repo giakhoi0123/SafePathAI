@@ -60,6 +60,16 @@ class Settings(BaseSettings):
     # Deprecated fallback flag kept False for strict Zero-Mock compliance
     USE_MOCK_CAMERA_FALLBACK: bool = False
 
+    # Image Enhancement & Super-Resolution Pipeline Settings
+    ENABLE_IMAGE_ENHANCEMENT: bool = True
+    ENABLE_SUPER_RESOLUTION: bool = False
+    IMAGE_ENHANCEMENT_MODE: str = "classic"  # "classic" or "classic+sr"
+    LOW_LIGHT_GAMMA: float = 1.4
+    CLAHE_CLIP_LIMIT: float = 2.0
+    CLAHE_TILE_GRID_SIZE: int = 8
+    DENOISE_H: float = 3.0
+    UNSHARP_STRENGTH: float = 0.45
+
     # Large Language Model API Key (Gemini / OpenAI)
     LLM_API_KEY: str = ""
 

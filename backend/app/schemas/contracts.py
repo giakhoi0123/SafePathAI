@@ -53,6 +53,40 @@ class EvidenceEligibility(str, Enum):
     NOT_VERIFIED_FOR_ROUTING = "NOT_VERIFIED_FOR_ROUTING"
 
 
+class ImageQualityMetrics(BaseModel):
+    """
+    Granular image quality metrics evaluated on camera snapshots.
+    """
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    brightness_score: float = Field(..., description="Mean luminance [0.0, 255.0]")
+    blur_score: float = Field(..., description="Laplacian variance sharpness score")
+    noise_estimate: float = Field(..., description="High-frequency noise estimate")
+    resolution_score: float = Field(..., description="Normalized resolution factor against 640x480")
+    contrast_score: float = Field(..., description="Standard deviation of grayscale intensities")
+    is_low_light: bool = Field(..., description="True if scene luminance is below dark threshold")
+    is_blurry: bool = Field(..., description="True if blur_score is below sharpness threshold")
+    is_low_quality: bool = Field(..., description="True if dark, blurry, noisy, or low-resolution")
+
+
+class ImageQualityAssessment(BaseModel):
+    """
+    Comprehensive quality status and enhancement metadata for a camera frame.
+    """
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    quality_status: str = Field(..., description="HIGH_QUALITY, ACCEPTABLE, POOR, or DEGRADED")
+    quality_flags: list[str] = Field(
+        default_factory=list,
+        description="Quality flags: LOW_LIGHT, LOW_RESOLUTION, BLURRY, NOISY, PARTIAL_OCCLUSION",
+    )
+    quality_metrics: ImageQualityMetrics
+    enhancement_applied: bool = Field(default=False, description="Whether enhancement pipeline was applied")
+    enhancement_mode: Optional[str] = Field(default=None, description="classic, classic+sr, or none")
+    enhanced_image_url: Optional[str] = Field(default=None, description="URL to view enhanced assistive frame")
+    super_resolution_status: Optional[str] = Field(default=None, description="Status of super-resolution model")
+
+
 class CameraEvidence(BaseModel):
     """
     Detailed evidence payload collected from a single traffic camera.
@@ -106,6 +140,18 @@ class CameraEvidence(BaseModel):
     flood_ratio: Optional[float] = Field(
         default=None, ge=0.0, le=1.0, description="Water segmentation ratio; None when unanalyzed"
     )
+    image_quality: Optional[ImageQualityAssessment] = Field(
+        default=None, description="Detailed quality assessment and enhancement flags"
+    )
+    enhanced_image_url: Optional[str] = Field(
+        default=None, description="URL to AI-assistive enhanced frame (never replaces original source evidence)"
+    )
+    enhancement_applied: bool = Field(
+        default=False, description="Whether enhancement was applied before inference"
+    )
+    model_pipeline: Optional[str] = Field(
+        default=None, description="Name of the vision and enhancement pipeline used"
+    )
     risk_level: RiskLevel = Field(..., description="Computed risk level for this camera feed")
     source_status: DataSourceStatus = Field(..., description="Current status of the camera feed")
     updated_at: datetime = Field(..., description="Timestamp when evidence was processed")
@@ -138,9 +184,31 @@ class CameraImageMetadata(BaseModel):
     vehicle_count: Optional[int] = None
     traffic_density_score: Optional[float] = None
     flood_ratio: Optional[float] = None
+    image_quality: Optional[ImageQualityAssessment] = None
+    enhanced_image_url: Optional[str] = None
+    enhancement_applied: bool = False
+    model_pipeline: Optional[str] = None
     etag: Optional[str] = None
     content_length: Optional[int] = None
     mime_type: Optional[str] = None
+
+
+class CameraSummary(BaseModel):
+    """
+    Summary operational statistics of registered cameras and ingestion status.
+    Directly reflects real PostGIS and scheduler database counts (Zero-Mock).
+    """
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    total_registered: int = Field(..., description="Total cameras registered in database")
+    valid_gps_count: int = Field(..., description="Number of cameras with valid WGS84 GPS coordinates")
+    checked_count: int = Field(..., description="Number of cameras checked by ingestion scheduler")
+    valid_images_count: int = Field(..., description="Number of cameras with live valid images (within 15m)")
+    stale_images_count: int = Field(..., description="Number of cameras with stale images (>15m)")
+    unavailable_count: int = Field(..., description="Number of cameras currently unreachable or offline")
+    analyzed_count: int = Field(..., description="Number of cameras processed by vision models")
+    last_scheduler_cycle: Optional[datetime] = Field(default=None, description="Timestamp of latest scheduler fetch attempt")
+    circuit_breaker_open: bool = Field(default=False, description="Whether HCMC traffic portal circuit breaker is open")
 
 
 class WeatherTideSignal(BaseModel):
@@ -285,4 +353,96 @@ class PlaceSearchResponse(BaseModel):
     results: List[PlaceResult] = Field(default_factory=list, description="List of matched locations")
     provider: str = Field(..., description="Geocoding provider used (photon, postgis, or fallback)")
     count: int = Field(..., description="Number of results returned")
+
+
+class UserSyncRequest(BaseModel):
+    """Payload to synchronize Google OAuth identity to backend database."""
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: str = Field(default="google", description="OAuth provider name")
+    provider_account_id: str = Field(..., description="Provider stable unique account ID (Google sub)")
+    email: str = Field(..., description="User verified email address")
+    display_name: str = Field(..., description="User display name")
+    avatar_url: Optional[str] = Field(default=None, description="Avatar image URL")
+
+
+class UserPreferenceDTO(BaseModel):
+    """User preferences schema."""
+    model_config = ConfigDict(from_attributes=True)
+
+    transport_mode: str = Field(default="motorcycle", description="motorcycle, car, bicycle, walk")
+    avoid_flood_level: str = Field(default="MEDIUM", description="LOW, MEDIUM, HIGH")
+    avoid_high_density: bool = Field(default=False)
+    alert_notifications: bool = Field(default=True)
+    voice_guidance_enabled: bool = Field(default=True)
+
+
+class UserSavedPlaceDTO(BaseModel):
+    """Saved place schema."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    address: str
+    lat: float
+    lng: float
+    category: str = "favorite"
+    created_at: Optional[datetime] = None
+
+
+class UserRouteHistoryDTO(BaseModel):
+    """Route history schema."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    origin_name: str
+    dest_name: str
+    origin_lat: Optional[float] = None
+    origin_lng: Optional[float] = None
+    dest_lat: Optional[float] = None
+    dest_lng: Optional[float] = None
+    distance_km: float
+    duration_mins: int
+    travel_mode: str = "motorcycle"
+    created_at: Optional[datetime] = None
+
+
+class UserProfileResponse(BaseModel):
+    """Full user profile response."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    email: str
+    display_name: str
+    avatar_url: Optional[str] = None
+    is_active: bool = True
+    preferences: UserPreferenceDTO
+    saved_places: List[UserSavedPlaceDTO] = Field(default_factory=list)
+    route_history: List[UserRouteHistoryDTO] = Field(default_factory=list)
+
+
+class CreateSavedPlaceRequest(BaseModel):
+    """Request to create a saved place."""
+    model_config = ConfigDict(from_attributes=True)
+
+    name: str = Field(..., min_length=1, max_length=255)
+    address: str = Field(..., min_length=1, max_length=512)
+    lat: float = Field(..., ge=-90.0, le=90.0)
+    lng: float = Field(..., ge=-180.0, le=180.0)
+    category: str = Field(default="favorite")
+
+
+class CreateRouteHistoryRequest(BaseModel):
+    """Request to store a completed route in user history."""
+    model_config = ConfigDict(from_attributes=True)
+
+    origin_name: str = Field(..., min_length=1, max_length=255)
+    dest_name: str = Field(..., min_length=1, max_length=255)
+    origin_lat: Optional[float] = None
+    origin_lng: Optional[float] = None
+    dest_lat: Optional[float] = None
+    dest_lng: Optional[float] = None
+    distance_km: float = Field(..., ge=0.0)
+    duration_mins: int = Field(..., ge=0)
+    travel_mode: str = Field(default="motorcycle")
 
