@@ -50,21 +50,97 @@ class CameraScheduler:
 
     async def get_active_priority_camera_ids(self, redis: Optional[Redis]) -> Tuple[Set[str], Set[str]]:
         """
-        Retrieves real-time high-priority camera IDs from Redis sets:
-        - active_viewed_cameras: cameras currently in active browser viewports
-        - active_route_cameras: cameras within corridors of active searched routes
+        Retrieves real-time high-priority camera IDs from Redis sets/zsets:
+        - active_viewed_cameras / active_viewed_cameras_zset: modal open / viewport
+        - active_route_cameras / active_route_cameras_zset: navigation corridor
+        Automatically prunes expired entries.
         """
         if redis is None:
             return set(), set()
         try:
-            viewed_raw = await redis.smembers("active_viewed_cameras")
-            route_raw = await redis.smembers("active_route_cameras")
-            viewed = {x if isinstance(x, str) else x.decode("utf-8") for x in viewed_raw}
-            route = {x if isinstance(x, str) else x.decode("utf-8") for x in route_raw}
+            now_ts = datetime.now(timezone.utc).timestamp()
+            # Clean expired zset members
+            await redis.zremrangebyscore("active_viewed_cameras_zset", "-inf", now_ts)
+            await redis.zremrangebyscore("active_route_cameras_zset", "-inf", now_ts)
+
+            # Retrieve active from zset
+            z_viewed_raw = await redis.zrange("active_viewed_cameras_zset", 0, -1)
+            z_route_raw = await redis.zrange("active_route_cameras_zset", 0, -1)
+
+            # Also check simple sets for backwards compatibility
+            s_viewed_raw = await redis.smembers("active_viewed_cameras")
+            s_route_raw = await redis.smembers("active_route_cameras")
+
+            viewed = {
+                (x if isinstance(x, str) else x.decode("utf-8"))
+                for x in (list(z_viewed_raw) + list(s_viewed_raw))
+            }
+            route = {
+                (x if isinstance(x, str) else x.decode("utf-8"))
+                for x in (list(z_route_raw) + list(s_route_raw))
+            }
             return viewed, route
         except Exception as exc:
             logger.debug("Failed to read priority sets from Redis: %s", exc)
             return set(), set()
+
+    async def register_active_viewed_cameras(
+        self,
+        redis: Optional[Redis],
+        cam_ids: List[str],
+        ttl_seconds: int = 90,
+    ) -> int:
+        """Registers actively viewed cameras (modal open or viewport) with automatic expiration."""
+        if redis is None or not cam_ids:
+            return 0
+        try:
+            now_ts = datetime.now(timezone.utc).timestamp()
+            expire_at = now_ts + ttl_seconds
+            mapping = {str(cid): expire_at for cid in cam_ids if cid}
+            if mapping:
+                await redis.zadd("active_viewed_cameras_zset", mapping)
+                await redis.sadd("active_viewed_cameras", *mapping.keys())
+                await redis.zremrangebyscore("active_viewed_cameras_zset", "-inf", now_ts)
+            return len(mapping)
+        except Exception as exc:
+            logger.warning("Failed to register active viewed cameras: %s", exc)
+            return 0
+
+    async def register_active_route_cameras(
+        self,
+        redis: Optional[Redis],
+        cam_ids: List[str],
+        ttl_seconds: int = 900,
+    ) -> int:
+        """Registers cameras along active navigation route corridor with automatic expiration."""
+        if redis is None or not cam_ids:
+            return 0
+        try:
+            now_ts = datetime.now(timezone.utc).timestamp()
+            expire_at = now_ts + ttl_seconds
+            mapping = {str(cid): expire_at for cid in cam_ids if cid}
+            if mapping:
+                await redis.zadd("active_route_cameras_zset", mapping)
+                await redis.sadd("active_route_cameras", *mapping.keys())
+                await redis.zremrangebyscore("active_route_cameras_zset", "-inf", now_ts)
+            return len(mapping)
+        except Exception as exc:
+            logger.warning("Failed to register active route cameras: %s", exc)
+            return 0
+
+    async def unregister_active_viewed_camera(
+        self,
+        redis: Optional[Redis],
+        cam_id: str,
+    ) -> None:
+        """Removes camera from actively viewed priority sets upon modal close."""
+        if redis is None or not cam_id:
+            return
+        try:
+            await redis.zrem("active_viewed_cameras_zset", str(cam_id))
+            await redis.srem("active_viewed_cameras", str(cam_id))
+        except Exception as exc:
+            logger.debug("Failed to unregister viewed camera %s: %s", cam_id, exc)
 
     async def acquire_batch(
         self,
@@ -78,15 +154,12 @@ class CameraScheduler:
         Guarantees that every camera in the 796-node registry gets rotated fairly.
         """
         now = datetime.now(timezone.utc)
+        active_cutoff = now - timedelta(seconds=60)
         viewed_ids, route_ids = await self.get_active_priority_camera_ids(redis)
 
         # Multi-tiered selection query:
-        # 1. Ready for poll: next_retry_at IS NULL OR next_retry_at <= now
-        # 2. Priority order:
-        #    - Tier 0: In active_viewed_cameras
-        #    - Tier 1: In active_route_cameras
-        #    - Tier 2: Stale data needing refresh
-        #    - Tier 3: Round-robin by last_attempt_at ASC (NULLs first!)
+        # Priority 1 (Active): Viewed (Tier 0) or Route corridor (Tier 1) attempted >= 60s ago
+        # Priority 2 (Background): Stale (Tier 2) or Round-robin (Tier 3) with next_retry_at <= now
         query_sql = text("""
             SELECT 
                 c.cam_id, 
@@ -109,7 +182,11 @@ class CameraScheduler:
             FROM traffic_cameras c
             LEFT JOIN camera_ingestion_state s ON c.cam_id = s.cam_id
             WHERE c.geom IS NOT NULL
-              AND (s.next_retry_at IS NULL OR s.next_retry_at <= :now)
+              AND (
+                (c.cam_id = ANY(:viewed_ids) AND (s.last_attempt_at IS NULL OR s.last_attempt_at <= :active_cutoff))
+                OR (c.cam_id = ANY(:route_ids) AND (s.last_attempt_at IS NULL OR s.last_attempt_at <= :active_cutoff))
+                OR (s.next_retry_at IS NULL OR s.next_retry_at <= :now)
+              )
             ORDER BY 
                 priority_tier ASC,
                 COALESCE(s.last_attempt_at, '1970-01-01 00:00:00+00'::timestamptz) ASC,
@@ -122,6 +199,7 @@ class CameraScheduler:
             "viewed_ids": list(viewed_ids) if viewed_ids else ["__none__"],
             "route_ids": list(route_ids) if route_ids else ["__none__"],
             "now": now,
+            "active_cutoff": active_cutoff,
             "now_epoch": now.timestamp(),
             "ttl": settings.CAMERA_IMAGE_TTL_SECONDS,
             "candidate_limit": candidate_limit,
@@ -204,13 +282,26 @@ class CameraScheduler:
                 logger.debug("Failed to release lease for %s: %s", cam_id, exc)
 
         # 2. Compute backoff & next retry
-        if res.is_valid_image:
+        is_new_success = res.is_valid_image and getattr(res, "is_new_snapshot", True)
+
+        if is_new_success:
             new_failure_count = 0
             next_retry = now + timedelta(seconds=self.base_interval_sec)
             status_str = "LIVE"
             val_status = res.validation_status or "VALID_FRAME"
             http_status = 200
             err_code = None
+            last_success_at_param = now
+        elif res.is_valid_image and not getattr(res, "is_new_snapshot", True):
+            # Fallback cache hit: served from local valid archive because network was offline or rate limited
+            # Keep historical success timestamp; do not set last_success_at = now
+            status_str = "STALE"
+            val_status = res.validation_status or "VALID_LOCAL_STALE"
+            http_status = 200
+            err_code = res.error_message
+            last_success_at_param = None
+            new_failure_count = 1
+            next_retry = now + timedelta(seconds=self.base_interval_sec)
         else:
             # Query existing failure count for backoff
             cur_fc = await session.execute(
@@ -227,6 +318,7 @@ class CameraScheduler:
             val_status = res.validation_status or "VALIDATION_FAILED"
             http_status = 200 if res.image_status_reason == "PLACEHOLDER_FRAME" else 503
             err_code = res.image_status_reason or "FETCH_FAILED"
+            last_success_at_param = None
 
         upsert_sql = text("""
             INSERT INTO camera_ingestion_state (
@@ -261,7 +353,7 @@ class CameraScheduler:
             "cam_id": cam_id,
             "source_status": status_str,
             "now": now,
-            "last_success_at": now if res.is_valid_image else None,
+            "last_success_at": last_success_at_param,
             "last_captured_at": res.captured_at,
             "last_retrieved_at": res.retrieved_at,
             "next_retry_at": next_retry,
@@ -311,6 +403,8 @@ class CameraScheduler:
         """
         now = datetime.now(timezone.utc)
         recent_cutoff = now - timedelta(hours=1)
+        cycle_target_sec = getattr(settings, "CAMERA_REFRESH_TARGET_SEC", 1800)
+        cycle_cutoff = now - timedelta(seconds=cycle_target_sec)
 
         stmt = text("""
             SELECT 
@@ -329,13 +423,15 @@ class CameraScheduler:
                 count(*) FILTER (WHERE source_status = 'OFFLINE') AS offline_count,
                 count(*) FILTER (WHERE last_attempt_at >= :recent_cutoff) AS attempted_recent,
                 count(*) FILTER (WHERE last_success_at >= :recent_cutoff) AS success_recent,
+                count(*) FILTER (WHERE last_attempt_at >= :cycle_cutoff) AS attempted_this_cycle,
+                count(*) FILTER (WHERE last_success_at >= :cycle_cutoff) AS success_this_cycle,
                 count(*) FILTER (WHERE validation_status = 'PLACEHOLDER_FRAME') AS placeholder_count,
                 count(*) FILTER (WHERE model_status = 'INFERENCE_COMPLETED') AS model_analyzed_count,
                 max(last_attempt_at) AS latest_attempt_at,
                 max(last_success_at) AS latest_success_at
             FROM camera_ingestion_state
         """)
-        row_state = (await session.execute(stmt_state, {"recent_cutoff": recent_cutoff})).fetchone()
+        row_state = (await session.execute(stmt_state, {"recent_cutoff": recent_cutoff, "cycle_cutoff": cycle_cutoff})).fetchone()
 
         # Error reason breakdown
         stmt_errors = text("""
@@ -350,18 +446,32 @@ class CameraScheduler:
         error_breakdown = {r.last_error_code: r.cnt for r in res_errors.fetchall()}
 
         viewed_ids, route_ids = await self.get_active_priority_camera_ids(redis)
+        total_registered = row_cam.total_registered if row_cam else 0
+        attempted_cycle = row_state.attempted_this_cycle if row_state else 0
+        success_cycle = row_state.success_this_cycle if row_state else 0
+        attempted_recent = row_state.attempted_recent if row_state else 0
+        pending_cycle = max(0, total_registered - attempted_cycle)
+        cpm = round(attempted_recent / 60.0, 1)
+        sweep_est_min = round(total_registered / max(cpm, 0.5), 1)
 
         return {
             "status": "healthy",
             "timestamp": now.isoformat(),
-            "total_registered_cameras": row_cam.total_registered if row_cam else 0,
+            "cycle_target_seconds": cycle_target_sec,
+            "cameras_checked_this_cycle": attempted_cycle,
+            "cameras_with_fresh_image": success_cycle,
+            "cameras_pending_this_cycle": pending_cycle,
+            "cameras_checked_per_minute": cpm,
+            "full_registry_sweep_duration_min": sweep_est_min,
+            "active_priority_refresh_interval_sec": 60,
+            "total_registered_cameras": total_registered,
             "geolocated_cameras": row_cam.with_gps if row_cam else 0,
             "historical_up_cameras": row_cam.historical_up if row_cam else 0,
             "tracked_in_scheduler": row_state.total_tracked if row_state else 0,
             "live_cameras": row_state.live_count if row_state else 0,
             "stale_cameras": row_state.stale_count if row_state else 0,
             "offline_cameras": row_state.offline_count if row_state else 0,
-            "recent_hour_attempts": row_state.attempted_recent if row_state else 0,
+            "recent_hour_attempts": attempted_recent,
             "recent_hour_successes": row_state.success_recent if row_state else 0,
             "placeholder_frames_excluded": row_state.placeholder_count if row_state else 0,
             "model_analyzed_cameras": row_state.model_analyzed_count if row_state else 0,

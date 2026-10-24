@@ -1,6 +1,15 @@
 import { test, expect } from "@playwright/test";
 
 test.describe("P0 Camera Icon Markers & Forensics Acceptance", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem(
+        "safepath_tour_state_v1",
+        JSON.stringify({ version: "v1", status: "completed", updatedAt: new Date().toISOString() })
+      );
+    });
+  });
+
   test("renders camera CCTV icons, clusters, hover tooltips, and truthful modal", async ({
     page,
   }) => {

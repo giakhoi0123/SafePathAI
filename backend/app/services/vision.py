@@ -63,7 +63,7 @@ MODERATE_FLOOD_RATIO = 0.10
 CRITICAL_TRAFFIC_DENSITY = 0.85
 MODERATE_TRAFFIC_DENSITY = 0.50
 
-DEFAULT_YOLO_PATH = "data/models/yolov5n.onnx"
+DEFAULT_YOLO_PATH = "data/models/yolo26n.onnx"
 DEFAULT_FLOOD_UNET_PATH = "data/models/flood_unet.onnx"
 DEFAULT_MANIFEST_PATH = "data/models/model_manifest.json"
 
@@ -450,6 +450,14 @@ def preprocess_camera_image(
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Image not found at path: {image_path}")
 
+    # Strict Zero-Mock & Placeholder Gate: Never enhance or analyze error frames
+    from backend.app.services.image_validator import validate_camera_image_bytes, ImageValidationStatus
+    with open(image_path, "rb") as _f:
+        _raw_bytes = _f.read()
+    _val = validate_camera_image_bytes(_raw_bytes)
+    if _val.status == ImageValidationStatus.PLACEHOLDER_ERROR_FRAME:
+        raise ValueError(f"Rejecting placeholder or invalid image at {image_path}: {_val.error_message}")
+
     image = cv2.imread(image_path)
     if image is None or image.size == 0:
         raise ValueError(f"Corrupted or empty image at path: {image_path}")
@@ -500,7 +508,7 @@ def preprocess_camera_image(
 
 class VehicleDetector:
     """
-    Real ONNX Vehicle Detector utilizing verified YOLOv5n weights.
+    Real ONNX Vehicle Detector utilizing verified official YOLO26n weights.
     Zero-Mock: Does NOT fall back to running OpenCV heuristic when weights are missing.
     In testing environments, supports explicit baseline heuristic mode.
     """
@@ -518,7 +526,7 @@ class VehicleDetector:
         self.session = None
         self.model_sha256 = None
         self.model_status = "MODEL_UNAVAILABLE"
-        self.version = "v7.0"
+        self.version = "yolo26n"
         self.provenance_status = "MODEL_UNAVAILABLE"
         self.validation_status = "EXPERIMENTAL_HCMC"
 
@@ -590,10 +598,143 @@ class VehicleDetector:
             vehicle_count=0,
             traffic_density_score=0.0,
             vehicles=[],
-            model_name=os.path.basename(self.model_path or "yolov5n.onnx"),
+            model_name=os.path.basename(self.model_path or "yolo26n.onnx"),
             model_sha256=self.model_sha256,
             error_message="MODEL_UNAVAILABLE: Model weights missing or failed to initialize.",
         )
+
+    def _extract_frame_candidates(
+        self,
+        orig_img: np.ndarray,
+        h_orig: int,
+        w_orig: int,
+        min_conf: float = 0.15,
+    ) -> List[Tuple[List[int], float, int]]:
+        """
+        Runs true ONNX forward pass on a single frame/tile,
+        decodes YOLO26 head, and remaps bounding boxes to (w_orig, h_orig).
+        Returns candidates as list of ([x1, y1, w, h], score, class_id).
+        """
+        if self.session is None:
+            return []
+
+        # 1. Preprocessing: letterbox to 640x640
+        img_letter, r, (dw, dh) = letterbox(orig_img, (640, 640))
+        # BGR to RGB, HWC to CHW
+        blob = img_letter[:, :, ::-1].transpose(2, 0, 1)
+        input_type = self.session.get_inputs()[0].type
+        dtype = np.float32 if input_type == "tensor(float)" else np.float16 if input_type == "tensor(float16)" else np.float32
+        blob = np.ascontiguousarray(blob, dtype=dtype) / dtype(255.0)
+        blob = blob[None, ...]  # Shape: [1, 3, 640, 640]
+
+        # 2. Forward pass via ONNX Runtime
+        input_name = self.session.get_inputs()[0].name
+        output_name = self.session.get_outputs()[0].name
+        out = self.session.run([output_name], {input_name: blob})[0]
+
+        if out.shape[1:] not in ((300, 6), (84, 8400)):
+            if out.shape == (1, 25200, 85):
+                raise ValueError("YOLOv5 weights rejected: SafePathAI strictly enforces YOLO26n architecture.")
+            raise ValueError(f"Unsupported YOLO26 output shape: {out.shape}")
+
+        decoded_boxes, scores, classes, _ = decode_yolo26_output(out, conf_threshold=min_conf)
+        candidates: List[Tuple[List[int], float, int]] = []
+
+        for i in range(len(decoded_boxes)):
+            cid = int(classes[i])
+            if cid in COCO_VEHICLE_CLASSES:
+                x1_box, y1_box, x2_box, y2_box = decoded_boxes[i]
+                x1 = int(round((x1_box - dw) / r))
+                y1 = int(round((y1_box - dh) / r))
+                x2 = int(round((x2_box - dw) / r))
+                y2 = int(round((y2_box - dh) / r))
+
+                x1 = max(0, min(w_orig - 1, x1))
+                y1 = max(0, min(h_orig - 1, y1))
+                box_w = max(1, min(w_orig - x1, x2 - x1))
+                box_h = max(1, min(h_orig - y1, y2 - y1))
+
+                candidates.append(([x1, y1, box_w, box_h], float(scores[i]), cid))
+
+        return candidates
+
+    def _extract_multiscale_candidates(
+        self,
+        img: np.ndarray,
+        h_orig: int,
+        w_orig: int,
+        min_conf: float = 0.15,
+        enable_tiling: bool = True,
+    ) -> List[Tuple[List[int], float, int]]:
+        """
+        Extracts candidates from full frame, and if frame resolution is low (<= 420x320),
+        generates 2x2 overlapping tiles with 15% overlap to resolve distant/small motorcycles.
+        """
+        candidates = self._extract_frame_candidates(img, h_orig, w_orig, min_conf=min_conf)
+
+        if enable_tiling and h_orig <= 420 and w_orig <= 500 and h_orig >= 100 and w_orig >= 100:
+            h_half = h_orig // 2
+            w_half = w_orig // 2
+            overlap_h = int(h_half * 0.15)
+            overlap_w = int(w_half * 0.15)
+
+            tile_coords = [
+                (0, min(h_orig, h_half + overlap_h), 0, min(w_orig, w_half + overlap_w)),
+                (0, min(h_orig, h_half + overlap_h), max(0, w_half - overlap_w), w_orig),
+                (max(0, h_half - overlap_h), h_orig, 0, min(w_orig, w_half + overlap_w)),
+                (max(0, h_half - overlap_h), h_orig, max(0, w_half - overlap_w), w_orig),
+            ]
+
+            for y1, y2, x1, x2 in tile_coords:
+                tile = img[y1:y2, x1:x2]
+                tile_h, tile_w = y2 - y1, x2 - x1
+                tile_candidates = self._extract_frame_candidates(tile, tile_h, tile_w, min_conf=min_conf)
+                for (tx, ty, tw, th), tscore, tcid in tile_candidates:
+                    fx = tx + x1
+                    fy = ty + y1
+                    fx = max(0, min(w_orig - 1, fx))
+                    fy = max(0, min(h_orig - 1, fy))
+                    tw = max(1, min(w_orig - fx, tw))
+                    th = max(1, min(h_orig - fy, th))
+                    candidates.append(([fx, fy, tw, th], tscore, tcid))
+
+        return candidates
+
+    def _apply_class_aware_nms(
+        self,
+        raw_candidates: List[Tuple[List[int], float, int]],
+        conf_threshold: float = 0.25,
+        nms_threshold: float = 0.45,
+        motorcycle_conf: float = 0.20,
+    ) -> List[DetectedVehicle]:
+        """
+        Executes Class-Aware NMS independently per vehicle class.
+        Guarantees that cars/trucks never suppress adjacent motorcycles.
+        """
+        detected_vehicles: List[DetectedVehicle] = []
+        for target_cid, (cls_name, weight) in COCO_VEHICLE_CLASSES.items():
+            cls_items = [c for c in raw_candidates if c[2] == target_cid]
+            score_thresh = motorcycle_conf if target_cid == 3 else conf_threshold
+            filtered = [c for c in cls_items if c[1] >= score_thresh]
+            if not filtered:
+                continue
+
+            boxes = [c[0] for c in filtered]
+            confs = [c[1] for c in filtered]
+            indices = cv2.dnn.NMSBoxes(boxes, confs, score_thresh, nms_threshold)
+            if len(indices) > 0:
+                for idx in indices.flatten():
+                    x, y, bw, bh = boxes[idx]
+                    conf = confs[idx]
+                    detected_vehicles.append(
+                        DetectedVehicle(
+                            cls_name=cls_name,
+                            confidence=round(conf, 3),
+                            bbox=(x, y, x + bw, y + bh),
+                            weight=weight,
+                        )
+                    )
+        return detected_vehicles
 
     def _detect_onnx_frame(
         self,
@@ -603,102 +744,10 @@ class VehicleDetector:
         conf_threshold: float = 0.25,
         nms_threshold: float = 0.45,
     ) -> List[DetectedVehicle]:
-        """Performs true ONNX forward pass, box decoding, and NMS on a single image frame."""
-        # 1. Preprocessing: letterbox to 640x640
-        img_letter, r, (dw, dh) = letterbox(orig_img, (640, 640))
-        # BGR to RGB, HWC to CHW
-        blob = img_letter[:, :, ::-1].transpose(2, 0, 1)
-        input_type = self.session.get_inputs()[0].type
-        dtype = np.float16 if input_type == "tensor(float16)" else np.float32 if input_type == "tensor(float)" else None
-        if dtype is None:
-            raise ValueError(f"Unsupported ONNX input type: {input_type}")
-        blob = np.ascontiguousarray(blob, dtype=dtype) / dtype(255.0)
-        blob = blob[None, ...]  # Shape: [1, 3, 640, 640]
-
-        # 2. Forward pass via ONNX Runtime
-        input_name = self.session.get_inputs()[0].name
-        output_name = self.session.get_outputs()[0].name
-        out = self.session.run([output_name], {input_name: blob})[0]
-
-        boxes: List[List[int]] = []
-        confidences: List[float] = []
-        class_ids: List[int] = []
-
-        if out.shape == (1, 25200, 85):
-            # 3a. Decode YOLOv5 candidate anchor boxes [1, 25200, 85]
-            detections = out[0]
-            for row in detections:
-                obj_conf = float(row[4])
-                if obj_conf < conf_threshold:
-                    continue
-
-                class_scores = row[5:]
-                class_id = int(np.argmax(class_scores))
-                class_conf = float(class_scores[class_id])
-                total_score = obj_conf * class_conf
-
-                if total_score >= conf_threshold and class_id in COCO_VEHICLE_CLASSES:
-                    cx, cy, w, h = float(row[0]), float(row[1]), float(row[2]), float(row[3])
-                    x1 = int(round((cx - w / 2.0 - dw) / r))
-                    y1 = int(round((cy - h / 2.0 - dh) / r))
-                    box_w = int(round(w / r))
-                    box_h = int(round(h / r))
-
-                    x1 = max(0, min(w_orig - 1, x1))
-                    y1 = max(0, min(h_orig - 1, y1))
-                    box_w = max(1, min(w_orig - x1, box_w))
-                    box_h = max(1, min(h_orig - y1, box_h))
-
-                    boxes.append([x1, y1, box_w, box_h])
-                    confidences.append(total_score)
-                    class_ids.append(class_id)
-
-            indices = cv2.dnn.NMSBoxes(boxes, confidences, conf_threshold, nms_threshold)
-        elif out.shape[1:] in ((300, 6), (84, 8400)):
-            # 3b. Decode YOLO26 detection heads ([1, 300, 6] or [1, 84, 8400])
-            decoded_boxes, scores, classes, needs_nms = decode_yolo26_output(out, conf_threshold=conf_threshold)
-            for i in range(len(decoded_boxes)):
-                cid = int(classes[i])
-                if cid in COCO_VEHICLE_CLASSES:
-                    x1_box, y1_box, x2_box, y2_box = decoded_boxes[i]
-                    x1 = int(round((x1_box - dw) / r))
-                    y1 = int(round((y1_box - dh) / r))
-                    x2 = int(round((x2_box - dw) / r))
-                    y2 = int(round((y2_box - dh) / r))
-
-                    x1 = max(0, min(w_orig - 1, x1))
-                    y1 = max(0, min(h_orig - 1, y1))
-                    box_w = max(1, min(w_orig - x1, x2 - x1))
-                    box_h = max(1, min(h_orig - y1, y2 - y1))
-
-                    boxes.append([x1, y1, box_w, box_h])
-                    confidences.append(float(scores[i]))
-                    class_ids.append(cid)
-
-            if needs_nms and boxes:
-                indices = cv2.dnn.NMSBoxes(boxes, confidences, conf_threshold, nms_threshold)
-            else:
-                indices = np.arange(len(boxes))
-        else:
-            raise ValueError(f"Unsupported YOLO output shape: {out.shape}")
-
-        detected_vehicles: List[DetectedVehicle] = []
-        if len(indices) > 0:
-            for idx in indices.flatten():
-                x, y, bw, bh = boxes[idx]
-                cid = class_ids[idx]
-                conf = confidences[idx]
-                cls_name, weight = COCO_VEHICLE_CLASSES[cid]
-
-                detected_vehicles.append(
-                    DetectedVehicle(
-                        cls_name=cls_name,
-                        confidence=round(conf, 3),
-                        bbox=(x, y, x + bw, y + bh),
-                        weight=weight,
-                    )
-                )
-        return detected_vehicles
+        """Performs ONNX forward pass, box decoding, and Class-Aware NMS on a single image frame."""
+        motorcycle_conf = min(conf_threshold, getattr(settings, "YOLO_MOTORCYCLE_CONF_THRESHOLD", 0.20))
+        candidates = self._extract_frame_candidates(orig_img, h_orig, w_orig, min_conf=min(conf_threshold, motorcycle_conf))
+        return self._apply_class_aware_nms(candidates, conf_threshold, nms_threshold, motorcycle_conf)
 
     def _detect_onnx(
         self,
@@ -706,54 +755,16 @@ class VehicleDetector:
         conf_threshold: float = 0.20,
         nms_threshold: float = 0.45,
     ) -> VehicleDetectionResult:
-        """Performs true ONNX forward pass, box decoding, and NMS on the original image with multi-scale tiling."""
+        """Performs full ONNX forward pass with 2x2 adaptive tiling and Class-Aware NMS."""
         img = prep.original_image
         h, w = prep.height, prep.width
-
-        # 1. Base full-frame detections
-        detected_vehicles = self._detect_onnx_frame(
-            img, h, w, conf_threshold, nms_threshold
+        motorcycle_conf = min(conf_threshold, getattr(settings, "YOLO_MOTORCYCLE_CONF_THRESHOLD", 0.20))
+        candidates = self._extract_multiscale_candidates(
+            img, h, w, min_conf=min(conf_threshold, motorcycle_conf), enable_tiling=True
         )
-
-        # 2. Adaptive 2x2 tiling for low-resolution camera frames (e.g. 306x236 HCMC traffic cams)
-        if h <= 320 and w <= 420 and h >= 100 and w >= 100:
-            h_half = h // 2
-            w_half = w // 2
-            overlap_h = int(h_half * 0.15)
-            overlap_w = int(w_half * 0.15)
-
-            tile_coords = [
-                (0, min(h, h_half + overlap_h), 0, min(w, w_half + overlap_w)),
-                (0, min(h, h_half + overlap_h), max(0, w_half - overlap_w), w),
-                (max(0, h_half - overlap_h), h, 0, min(w, w_half + overlap_w)),
-                (max(0, h_half - overlap_h), h, max(0, w_half - overlap_w), w),
-            ]
-
-            tile_vehicles: List[DetectedVehicle] = []
-            for y1, y2, x1, x2 in tile_coords:
-                tile = img[y1:y2, x1:x2]
-                dets = self._detect_onnx_frame(
-                    tile, y2 - y1, x2 - x1, conf_threshold, nms_threshold
-                )
-                for d in dets:
-                    bx1, by1, bx2, by2 = d.bbox
-                    remapped_box = (bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)
-                    tile_vehicles.append(
-                        DetectedVehicle(
-                            cls_name=d.cls_name,
-                            confidence=d.confidence,
-                            bbox=remapped_box,
-                            weight=d.weight,
-                        )
-                    )
-
-            if tile_vehicles:
-                all_v = list(detected_vehicles) + tile_vehicles
-                boxes = [[v.bbox[0], v.bbox[1], v.bbox[2] - v.bbox[0], v.bbox[3] - v.bbox[1]] for v in all_v]
-                confs = [v.confidence for v in all_v]
-                indices = cv2.dnn.NMSBoxes(boxes, confs, conf_threshold, nms_threshold)
-                if len(indices) > 0:
-                    detected_vehicles = [all_v[i] for i in indices.flatten()]
+        detected_vehicles = self._apply_class_aware_nms(
+            candidates, conf_threshold=conf_threshold, nms_threshold=nms_threshold, motorcycle_conf=motorcycle_conf
+        )
 
         total_weight = sum(v.weight for v in detected_vehicles)
         density_score = min(1.0, max(0.0, round(total_weight / DENSITY_SATURATION_WEIGHT, 3)))
@@ -764,7 +775,7 @@ class VehicleDetector:
             vehicle_count=len(detected_vehicles),
             traffic_density_score=density_score,
             vehicles=detected_vehicles,
-            model_name=os.path.basename(self.model_path or "yolov5n.onnx"),
+            model_name=os.path.basename(self.model_path or "yolo26n.onnx"),
             model_sha256=self.model_sha256[:16] if self.model_sha256 else None,
             error_message=None,
         )
@@ -772,13 +783,13 @@ class VehicleDetector:
     def detect_vehicles_dual_path(
         self,
         prep: PreprocessResult,
-        conf_threshold: float = 0.25,
+        conf_threshold: float = 0.20,
         nms_threshold: float = 0.45,
     ) -> Tuple[VehicleDetectionResult, Dict[str, Any]]:
         """
         Runs dual-path inference:
-        - Branch A: Original camera snapshot
-        - Branch B: Enhanced camera snapshot (Adaptive Gamma + CLAHE + Bilateral + Unsharp)
+        - Branch A: Original camera snapshot (with 2x2 adaptive tiling + Class-Aware NMS)
+        - Branch B: Enhanced camera snapshot (with 2x2 adaptive tiling + Class-Aware NMS)
         Merges detection outputs via IoU NMS to recover dark/blurry vehicles while
         strictly preserving zero-mock integrity (no hallucinated boxes).
         """
@@ -786,15 +797,23 @@ class VehicleDetector:
             res = self.detect_vehicles(prep, conf_threshold, nms_threshold)
             return res, {"branch": "fallback", "delta": 0}
 
-        # Branch A: Original Image
-        vehicles_a = self._detect_onnx_frame(
-            prep.original_image, prep.height, prep.width, conf_threshold, nms_threshold
+        motorcycle_conf = min(conf_threshold, getattr(settings, "YOLO_MOTORCYCLE_CONF_THRESHOLD", 0.20))
+
+        # Branch A: Original Image (with 2x2 adaptive tiling)
+        candidates_a = self._extract_multiscale_candidates(
+            prep.original_image, prep.height, prep.width, min_conf=min(conf_threshold, motorcycle_conf), enable_tiling=True
+        )
+        vehicles_a = self._apply_class_aware_nms(
+            candidates_a, conf_threshold=conf_threshold, nms_threshold=nms_threshold, motorcycle_conf=motorcycle_conf
         )
 
-        # Branch B: Enhanced Image
+        # Branch B: Enhanced Image (with 2x2 adaptive tiling)
         if prep.enhanced_image is not None and getattr(settings, "ENABLE_IMAGE_ENHANCEMENT", True):
-            vehicles_b = self._detect_onnx_frame(
-                prep.enhanced_image, prep.height, prep.width, conf_threshold, nms_threshold
+            candidates_b = self._extract_multiscale_candidates(
+                prep.enhanced_image, prep.height, prep.width, min_conf=min(conf_threshold, motorcycle_conf), enable_tiling=True
+            )
+            vehicles_b = self._apply_class_aware_nms(
+                candidates_b, conf_threshold=conf_threshold, nms_threshold=nms_threshold, motorcycle_conf=motorcycle_conf
             )
             merged = _merge_detections(vehicles_a, vehicles_b, iou_threshold=nms_threshold)
             branch_used = "DUAL_PATH_FUSED"
@@ -812,7 +831,7 @@ class VehicleDetector:
             vehicle_count=len(merged),
             traffic_density_score=density_score,
             vehicles=merged,
-            model_name=os.path.basename(self.model_path or "yolov5n.onnx"),
+            model_name=os.path.basename(self.model_path or "yolo26n.onnx"),
             model_sha256=self.model_sha256[:16] if self.model_sha256 else None,
             error_message=None,
         )
@@ -1158,7 +1177,7 @@ def create_visual_evidence_overlay(
     # 3. Provenance Watermark Banner
     cv2.rectangle(annotated, (0, 0), (w, 22), (20, 24, 30), -1)
     model_tag = (
-        f"ONNX YOLOv5n [{vehicle_result.model_sha256[:8]}]"
+        f"ONNX {vehicle_result.model_name or 'YOLO26n'} [{vehicle_result.model_sha256[:8]}]"
         if vehicle_result.is_available and vehicle_result.model_sha256
         else "MODEL_UNAVAILABLE"
     )

@@ -45,6 +45,7 @@ def calculate_segment_risk(
     segment: Union[RoadEdge, RoadSegment, Dict[str, Any]],
     camera_evidences: List[CameraEvidence],
     weather_tide: Optional[WeatherTideSignal] = None,
+    traffic_news: Optional[List[Any]] = None,
 ) -> RouteSegmentRisk:
     """
     Calculates the multi-criteria risk assessment for a specific OSM road segment or edge.
@@ -54,6 +55,8 @@ def calculate_segment_risk(
       Spatially near cameras without verified view orientation cannot score the road.
     - Historical flood points and regional weather are context, not a current
       measurement of water on this exact road segment.
+    - Traffic news: Only fresh (< 3h), geocoded, verified ACTIVE_HAZARD articles can influence risk.
+      Historical, forecast, recovered, or unlocated articles are strictly filtered out (Rule 6).
     - If a segment has no verified camera observations and is not flood-prone:
         - Returns RiskLevel.UNKNOWN with risk_score = None.
     """
@@ -163,6 +166,23 @@ def calculate_segment_risk(
         if freshness_seconds is None and rain_fresh:
             freshness_seconds = (now - rain_observed).total_seconds()
 
+    # 2.5 Evaluate Traffic News Hazards (Rule 6: Zero-Mock & Strict Disqualification)
+    eligible_news_category: Optional[str] = None
+    if traffic_news:
+        from backend.app.services.traffic_news import is_article_eligible_for_route_risk
+        for art in traffic_news:
+            if not is_article_eligible_for_route_risk(art, now=now):
+                # Disqualify old news, unlocated news, forecasts, historical, or unverified
+                continue
+
+            art_title = (getattr(art, "title", "") or "").lower()
+            art_summary = (getattr(art, "summary", "") or "").lower()
+            norm_street = (street_name or "").lower()
+
+            if norm_street and len(norm_street) >= 3 and (norm_street in art_title or norm_street in art_summary):
+                eligible_news_category = (getattr(art, "category", "") or "").upper()
+                break
+
     # 3. Determine Risk Level and Multi-Criteria Score
     risk_level = RiskLevel.UNKNOWN
     final_score: Optional[float] = None
@@ -181,6 +201,15 @@ def calculate_segment_risk(
         elif camera_risk_score >= MODERATE_RISK_THRESHOLD:
             risk_level = RiskLevel.MODERATE
             final_score = camera_risk_score
+
+    # Case B: Verified active hazard from fresh, located news report
+    elif eligible_news_category in ("FLOOD", "NGẬP NƯỚC", "ACCIDENT", "TAI NẠN", "ROAD_CLOSURE", "CẤM ĐƯỜNG"):
+        risk_level = RiskLevel.CRITICAL
+        final_score = 80.0
+
+    elif eligible_news_category in ("CONGESTION", "ÙN TẮC"):
+        risk_level = RiskLevel.MODERATE
+        final_score = 50.0
 
     # Case D: No verified camera, no active flood history match
     else:

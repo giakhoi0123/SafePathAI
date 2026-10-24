@@ -18,18 +18,21 @@ import {
   MapPin,
   Clock,
   Compass,
+  Newspaper,
+  ExternalLink,
 } from "lucide-react";
 import { LiquidGlassCard } from "../components/ui/LiquidGlassCard";
 import { CityScene } from "../components/spatial/CityScene";
 import { ObservationImage } from "../components/spatial/ObservationImage";
 import { useLiveObservations } from "../hooks/useLiveObservations";
 import { cameraObservationStatus, currentRain, currentTide, observationTime } from "../lib/observations";
-import { getCameraImageUrl, getCameraAnalyzedImageUrl } from "../services/api";
+import { getCameraImageUrl, getCameraAnalyzedImageUrl, fetchTrafficNewsHighlights } from "../services/api";
+import type { TrafficNewsItem } from "../types/contracts";
 
 const chapters = [
   "Thành phố & Mưa ngập",
   "Mắt thần 796 Camera",
-  "Thời tiết & Triều cường",
+  "Bản tin giao thông",
   "Lộ trình tránh ngập",
 ];
 
@@ -37,7 +40,16 @@ export default function LandingPage() {
   const track = useRef<HTMLDivElement>(null);
   const [progress, setProgress] = useState(0);
   const [selectedId, setSelectedId] = useState("");
+  const [newsHighlights, setNewsHighlights] = useState<TrafficNewsItem[]>([]);
   const live = useLiveObservations();
+
+  useEffect(() => {
+    fetchTrafficNewsHighlights(3)
+      .then((res) => {
+        if (res?.items?.length) setNewsHighlights(res.items);
+      })
+      .catch(() => {});
+  }, []);
 
   const camera =
     live.cameras.find((c) => c.cam_id === selectedId) ||
@@ -122,7 +134,10 @@ export default function LandingPage() {
         </span>
         <div className="nav-links">
           <button onClick={() => jump(1)}>Mắt thần Camera</button>
-          <button onClick={() => jump(2)}>Thời tiết & Triều</button>
+          <button onClick={() => jump(2)}>Bản tin giao thông</button>
+          <Link href="/news" className="text-xs font-semibold text-indigo-700 hover:text-indigo-900 transition flex items-center gap-1">
+            Bản tin <ArrowUpRight size={12} />
+          </Link>
           <button onClick={() => jump(3)}>Điều hướng</button>
         </div>
         <Link href="/map" className="nav-cta">
@@ -171,12 +186,12 @@ export default function LandingPage() {
                 hình ảnh thực địa để gợi ý cung đường cao ráo, thuận tiện nhất cho bạn.
               </p>
               <Link className="liquid-pill primary-spatial group" href="/map">
-                <span>Bắt đầu lộ trình an toàn</span>
+                <span>Tìm lộ trình tránh ngập</span>
                 <ArrowUpRight size={18} className="group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition" />
               </Link>
               <div className="hero-trust">
                 <ShieldCheck size={16} className="text-emerald-600" />
-                <span>Dữ liệu thực địa 100% · Không tạo số liệu giả lập</span>
+                <span>Dữ liệu thực địa từ Sở GTVT & KTTV · Nguyên tắc Zero-Mock</span>
               </div>
             </div>
 
@@ -350,7 +365,7 @@ export default function LandingPage() {
             </span>
           </section>
 
-          {/* SCENE 2: Thời tiết & Triều cường */}
+          {/* SCENE 2: Bản tin giao thông thành phố */}
           <section
             className={`story-scene fusion-scene ${scene === 2 ? "is-active" : ""}`}
             aria-hidden={scene !== 2}
@@ -359,69 +374,95 @@ export default function LandingPage() {
             }}
           >
             <div className="scene-heading">
-              <span className="eyebrow">02 / TÌNH BÁO THỜI TIẾT & TRIỀU CƯỜNG SÔNG SÀI GÒN</span>
+              <span className="eyebrow">02 / BẢN TIN GIAO THÔNG THÀNH PHỐ</span>
               <h2>
-                Dự báo mưa cục bộ.
+                Biết trước những gì đang diễn ra.
                 <br />
-                <span>Theo dõi đỉnh triều Phú An & Nhà Bè.</span>
+                <span>Cập nhật giao thông trước mỗi hành trình.</span>
               </h2>
               <p className="text-xs text-ink-600 max-w-lg mx-auto">
-                Mưa to gặp triều cường dâng cao là nguyên nhân gây ngập nghiêm trọng tại TP.HCM.
-                SafePathAI đồng bộ cả 2 yếu tố để phòng ngừa rủi ro ngập trước khi bạn khởi hành.
+                Tổng hợp sự cố giao thông, ngập úng và các điểm thi công từ VnExpress, Tuổi Trẻ và Cổng thông tin giao thông TP.HCM.
               </p>
             </div>
 
-            <div className="environment-grid">
-              {/* Rain Card */}
-              <LiquidGlassCard>
-                <div className="flex items-center gap-2">
-                  <CloudRain size={28} className="text-indigo-600" />
-                  <div>
-                    <h3 className="font-bold text-ink-950 text-sm">Lượng mưa quan trắc</h3>
-                    <span className="text-[10px] text-ink-500 font-mono">Nguồn Open-Meteo API</span>
-                  </div>
-                </div>
-                <strong data-testid="observed-rain" className="text-4xl font-black text-ink-950 my-2">
-                  {rain === null ? "0.0" : rain.toFixed(1)} <small className="text-sm font-normal text-ink-500">mm/h</small>
-                </strong>
-                <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200 w-fit">
-                  {rain !== null && rain > 0 ? "Có mưa cục bộ" : "Thời tiết tạnh ráo"}
-                </span>
-                <p className="text-[11px] text-ink-600 mt-2">
-                  Cập nhật tự động theo tọa độ GPS từng camera và cung đường di chuyển.
-                </p>
-              </LiquidGlassCard>
+            <div className="environment-grid news-landing-grid">
+              {newsHighlights.length > 0 ? (
+                newsHighlights.slice(0, 2).map((item) => (
+                  <LiquidGlassCard key={item.id} className="news-float-card flex flex-col justify-between">
+                    <div className="space-y-2.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                          {item.category || "Tin giao thông"}
+                        </span>
+                        {item.location_confidence !== "UNRESOLVED" && item.lat && (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                            <MapPin size={10} />
+                            <span>Vị trí xác minh</span>
+                          </span>
+                        )}
+                      </div>
 
-              {/* Tide Card */}
-              <LiquidGlassCard>
-                <div className="flex items-center gap-2">
-                  <Waves size={28} className="text-sky-600" />
-                  <div>
-                    <h3 className="font-bold text-ink-950 text-sm">
-                      Mực nước triều cường {live.weather?.tide_station ? `· ${live.weather.tide_station}` : "· Trạm Phú An"}
-                    </h3>
-                    <span className="text-[10px] text-ink-500 font-mono">Hệ mốc Quốc gia Hòn Dấu (VN-2000)</span>
-                  </div>
-                </div>
-                <strong data-testid="observed-tide" className="text-4xl font-black text-ink-950 my-2">
-                  {tide === null ? "—" : tide.toFixed(2)} <small className="text-sm font-normal text-ink-500">m</small>
-                </strong>
-                <span className="inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200 w-fit">
-                  {tide !== null && tide >= 1.50
-                    ? "Cảnh báo: Triều đạt mức Báo động 2 (>1.50m)"
-                    : "Mực nước dưới ngưỡng báo động"}
-                </span>
-                <p className="text-[11px] text-ink-600 mt-2">
-                  {tide === null
-                    ? "Đang đợi bản tin tiếp theo từ Đài Khí tượng Thủy văn Nam Bộ."
-                    : `Thời điểm quan trắc: ${observationTime(live.weather?.tide_observed_at)}`}
-                </p>
-              </LiquidGlassCard>
+                      {item.image_url && (
+                        <div className="h-28 rounded-xl overflow-hidden bg-slate-100 border border-slate-200/80">
+                          <img
+                            src={item.image_url}
+                            alt={item.title}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              (e.target as HTMLElement).style.display = "none";
+                            }}
+                          />
+                        </div>
+                      )}
+
+                      <h3 className="font-bold text-sm text-ink-950 line-clamp-2 leading-snug">
+                        {item.title}
+                      </h3>
+                      <p className="text-xs text-ink-600 line-clamp-2 leading-relaxed">
+                        {item.summary}
+                      </p>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-200/60 flex items-center justify-between text-xs mt-2">
+                      <span className="text-[11px] text-ink-500 font-medium truncate max-w-[150px]">
+                        {item.source_name || "Nguồn tin báo chí"}
+                      </span>
+                      <a
+                        href={item.canonical_url || item.link || "#"}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-bold text-indigo-600 hover:underline flex items-center gap-1"
+                      >
+                        <span>Xem nguồn</span>
+                        <ExternalLink size={12} />
+                      </a>
+                    </div>
+                  </LiquidGlassCard>
+                ))
+              ) : (
+                <LiquidGlassCard className="col-span-2 text-center p-6 space-y-2">
+                  <Newspaper size={32} className="mx-auto text-indigo-400" />
+                  <h3 className="font-bold text-sm text-ink-950">Đang đồng bộ luồng bản tin TP.HCM</h3>
+                  <p className="text-xs text-ink-600">
+                    Hệ thống đang nạp thông tin giao thông từ các nguồn báo chí và cơ quan quản lý.
+                  </p>
+                </LiquidGlassCard>
+              )}
             </div>
 
-            <div className="observation-context liquid-pill">
-              <ShieldCheck size={16} className="text-indigo-600" />
-              <span>Số liệu thủy văn được xác thực nguồn gốc · Không sinh sóng sin nhân tạo.</span>
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-3 mt-4">
+              <Link href="/news" className="liquid-pill primary-spatial group shadow-glass">
+                <Newspaper size={18} />
+                <span>Khám phá bản tin giao thông</span>
+                <ArrowUpRight size={18} className="group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition" />
+              </Link>
+
+              <div className="observation-context liquid-pill">
+                <ShieldCheck size={16} className="text-indigo-600" />
+                <span>
+                  Mưa quan trắc {rain === null ? "0.0 mm/h" : `${rain.toFixed(1)} mm/h`} · Triều {tide === null ? "—" : `${tide.toFixed(2)} m`}
+                </span>
+              </div>
             </div>
           </section>
 
@@ -448,25 +489,28 @@ export default function LandingPage() {
                 dễ ngập và hướng dẫn bằng giọng nói tiếng Việt rõ ràng.
               </p>
 
-              {/* Route Comparison Card */}
-              <div className="route-comparison bg-slate-50/80 rounded-2xl border border-slate-200/80 p-4 my-4 max-w-lg mx-auto">
-                <div className="text-left space-y-1">
+              {/* Route Comparison Card with Explicit Simulation Label */}
+              <div className="relative route-comparison bg-slate-50/85 rounded-2xl border border-slate-200/80 p-4 my-4 max-w-lg mx-auto shadow-glass-sm">
+                <div className="absolute -top-3 left-4 px-2.5 py-0.5 rounded-full bg-indigo-50 border border-indigo-200/80 text-[10px] font-bold text-indigo-700 shadow-sm uppercase tracking-wider">
+                  Minh họa cách hoạt động • Mô phỏng so sánh
+                </div>
+                <div className="text-left space-y-1 mt-1">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-rose-600">
                     Tuyến đường thông thường
                   </span>
-                  <strong className="text-lg font-bold text-ink-900 block">6.2 km • 35 phút</strong>
+                  <strong className="text-base sm:text-lg font-bold text-ink-900 block">Khoảng cách ngắn nhất</strong>
                   <small className="text-[10px] text-rose-600 font-semibold block">
-                    ⚠ Nguy cơ ngập tại đường trũng
+                    ⚠ Thường đi qua vùng trũng thấp có nguy cơ ngập nước
                   </small>
                 </div>
                 <div className="text-slate-400 font-bold text-xs">VS</div>
-                <div className="text-left space-y-1 bg-emerald-50/80 p-2.5 rounded-xl border border-emerald-200">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700">
-                    Tuyến SafePathAI (Khuyên dùng)
+                <div className="text-left space-y-1 bg-indigo-50/80 p-2.5 rounded-xl border border-indigo-200/80 mt-1">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-700">
+                    Tuyến đề xuất SafePathAI
                   </span>
-                  <strong className="text-lg font-bold text-emerald-900 block">6.8 km • 24 phút</strong>
-                  <small className="text-[10px] text-emerald-700 font-semibold block">
-                    ✓ Đường cao ráo, thông thoáng
+                  <strong className="text-base sm:text-lg font-bold text-indigo-950 block">Điều hướng ưu tiên độ cao</strong>
+                  <small className="text-[10px] text-indigo-700 font-semibold block">
+                    ✓ Tối ưu tránh điểm ngập & đối chiếu camera thực địa
                   </small>
                 </div>
               </div>

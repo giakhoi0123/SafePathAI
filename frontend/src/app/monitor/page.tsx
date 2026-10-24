@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { fetchCameras, fetchCameraSummary, getCameraImageUrl } from "../../services/api";
+import { fetchCameras, fetchCameraSummary, getCameraImageUrl, registerActiveViewedCameras } from "../../services/api";
 import { CameraEvidence, CameraSummary } from "../../types/contracts";
 import { CameraEvidenceModal } from "../../components/CameraEvidenceModal";
 import {
@@ -20,6 +20,7 @@ import {
   Layers,
   User,
   CheckCircle,
+  Clock,
 } from "lucide-react";
 import { GlassBadge, GlassInput } from "../../components/Glass";
 
@@ -92,6 +93,17 @@ export default function CameraMonitorPage() {
     }
     return true;
   });
+
+  const visibleTopCamIds = filteredCameras.slice(0, 12).map((c) => c.cam_id).join(",");
+  useEffect(() => {
+    if (!visibleTopCamIds) return;
+    const topIds = visibleTopCamIds.split(",");
+    registerActiveViewedCameras(topIds, 90).catch(() => {});
+    const interval = setInterval(() => {
+      registerActiveViewedCameras(topIds, 90).catch(() => {});
+    }, 45000);
+    return () => clearInterval(interval);
+  }, [visibleTopCamIds]);
 
   return (
     <div className="spatial-aux flex flex-col min-h-screen text-ink-900 relative selection:bg-indigo-600 selection:text-white pb-16">
@@ -181,20 +193,22 @@ export default function CameraMonitorPage() {
               </div>
             </div>
 
-            {/* Metric 2: Camera đã kiểm tra */}
+            {/* Metric 2: Camera đã kiểm tra trong chu kỳ 30 phút */}
             <div className="liquid-glass-surface rounded-3xl p-4 sm:p-5 flex flex-col justify-between space-y-3 group hover:border-blue-200">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-ink-700">Camera đã kiểm tra</span>
+                <span className="text-xs font-bold text-ink-700">Đã rà soát chu kỳ này</span>
                 <div className="p-2.5 rounded-2xl bg-blue-50/90 border border-blue-100 text-blue-600 shadow-glass-sm group-hover:scale-105 transition-transform">
                   <Radio className="w-4 h-4" />
                 </div>
               </div>
               <div>
                 <div className="text-2xl sm:text-3xl font-black text-ink-950 font-mono tracking-tight">
-                  {summary.checked_count}
+                  {summary.cycle_checked_count ?? summary.checked_count}
                 </div>
                 <div className="mt-1 text-[11px] text-ink-500 font-medium">
-                  trên tổng số {summary.total_registered} camera toàn thành phố
+                  {summary.cycle_pending_count !== undefined && summary.cycle_pending_count !== null
+                    ? `Chu kỳ 30 phút • Còn chờ ${summary.cycle_pending_count} camera`
+                    : `trên tổng số ${summary.total_registered} camera toàn thành phố`}
                 </div>
               </div>
             </div>
@@ -212,7 +226,7 @@ export default function CameraMonitorPage() {
                   {summary.valid_images_count}
                 </div>
                 <div className="mt-1 text-[11px] text-ink-500 font-medium">
-                  {summary.circuit_breaker_open ? "Đang điều tiết tải kết nối" : "nhận snapshot trong 15 phút qua"}
+                  {summary.circuit_breaker_open ? "Đang điều tiết tải kết nối" : "snapshot hợp lệ trong chu kỳ 30 phút"}
                 </div>
               </div>
             </div>
@@ -233,6 +247,22 @@ export default function CameraMonitorPage() {
                   nhận diện phương tiện & kiểm tra ngập
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* Friendly Cycle Status Banner */}
+        {summary && summary.last_scheduler_cycle && (
+          <div className="flex items-center justify-between px-4 py-2.5 rounded-2xl bg-white/70 border border-white/90 text-xs text-ink-600 shadow-glass-sm">
+            <div className="flex items-center gap-2">
+              <Clock className="w-3.5 h-3.5 text-indigo-500" />
+              <span>
+                Cập nhật gần nhất: <strong>{new Date(summary.last_scheduler_cycle).toLocaleTimeString("vi-VN")}</strong>
+              </span>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-ink-500">
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span>Lượt cập nhật xoay vòng toàn mạng lưới: <strong>Mỗi 30 phút</strong></span>
             </div>
           </div>
         )}
@@ -327,6 +357,7 @@ export default function CameraMonitorPage() {
               return (
                 <div
                   key={cam.cam_id}
+                  data-testid="camera-card"
                   onClick={() => setSelectedCamera(cam)}
                   className="group relative rounded-3xl overflow-hidden border border-white/95 bg-gradient-to-b from-white/95 via-white/90 to-ice-50/40 hover:bg-white shadow-glass hover:shadow-glass-elevated hover:border-white transition-all duration-300 hover:-translate-y-1 cursor-pointer flex flex-col"
                 >

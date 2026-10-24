@@ -16,6 +16,7 @@
     "@deck.gl/mapbox": "^9.0.32",
     "@deck.gl/react": "^9.0.32",
     "clsx": "^2.1.1",
+    "driver.js": "^1.10.2",
     "lucide-react": "^0.453.0",
     "maplibre-gl": "^4.7.1",
     "next": "14.2.15",

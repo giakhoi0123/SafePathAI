@@ -19,6 +19,8 @@ import {
   getCameraAnalyzedImageUrl,
   getLocationWeather,
   getNearbyTrafficNews,
+  registerActiveViewedCameras,
+  unregisterActiveViewedCamera,
 } from "../services/api";
 import {
   X,
@@ -68,10 +70,67 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
   const [metadata, setMetadata] = useState<CameraImageMetadata | null>(null);
   const [, setIsLoadingMetadata] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [imgTimestamp, setImgTimestamp] = useState<number>(Date.now());
+  const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
+  const [lastCheckTime, setLastCheckTime] = useState<Date | null>(null);
+  const hadValidImageRef = useRef(false);
   const [cooldown, setCooldown] = useState(0);
   const [localWeather, setLocalWeather] = useState<LocationWeatherResponse | null>(null);
   const [trafficNews, setTrafficNews] = useState<NearbyTrafficNewsResponse | null>(null);
   const [loadingNews, setLoadingNews] = useState(false);
+
+  // Priority 60s active refresh registration & periodic polling while modal is open
+  useEffect(() => {
+    if (!camera?.cam_id) return;
+    const camId = camera.cam_id;
+
+    // Immediately lease Priority 1 for this camera (90s TTL)
+    registerActiveViewedCameras([camId], 90).catch(() => {});
+    setLastCheckTime(new Date());
+
+    const interval = setInterval(async () => {
+      try {
+        setIsAutoRefreshing(true);
+        // Renew 90s priority lease
+        await registerActiveViewedCameras([camId], 90);
+        // Fetch latest metadata
+        const updatedMeta = await fetchCameraMetadata(camId);
+        setLastCheckTime(new Date());
+
+        setMetadata((prev) => {
+          if (!prev) return updatedMeta;
+          const hashChanged = updatedMeta.image_hash && updatedMeta.image_hash !== prev.image_hash;
+          const successChanged = updatedMeta.last_success_at && updatedMeta.last_success_at !== prev.last_success_at;
+
+          if ((hashChanged || successChanged) && updatedMeta.has_image) {
+            // Preload new snapshot image to avoid UI flicker
+            if (typeof window !== "undefined") {
+              const preloadImg = new window.Image();
+              const newSrc = `${getCameraImageUrl(camId)}?t=${Date.now()}`;
+              preloadImg.src = newSrc;
+              preloadImg.onload = () => {
+                setImgTimestamp(Date.now());
+                setImageError(false);
+                hadValidImageRef.current = true;
+              };
+            }
+          } else if (!updatedMeta.has_image && !hadValidImageRef.current) {
+            setImageError(true);
+          }
+          return updatedMeta;
+        });
+      } catch (e) {
+        console.debug("Auto-refresh check error:", e);
+      } finally {
+        setIsAutoRefreshing(false);
+      }
+    }, 30000);
+
+    return () => {
+      clearInterval(interval);
+      unregisterActiveViewedCamera(camId).catch(() => {});
+    };
+  }, [camera?.cam_id]);
 
   // Cooldown countdown timer
   useEffect(() => {
@@ -117,6 +176,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
       setMetadata(null);
       setImageError(false);
       setActiveView("original");
+      hadValidImageRef.current = false;
       return;
     }
     let active = true;
@@ -128,8 +188,12 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
       .then((meta) => {
         if (!active) return;
         setMetadata(meta);
+        setLastCheckTime(new Date());
         if (!meta.has_image) {
           setImageError(true);
+          hadValidImageRef.current = false;
+        } else {
+          hadValidImageRef.current = true;
         }
       })
       .catch(() => {
@@ -288,6 +352,10 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
     if (cooldown > 0) return;
     setCooldown(5);
     setImageError(false);
+    if (camera?.cam_id) {
+      registerActiveViewedCameras([camera.cam_id], 90).catch(() => {});
+    }
+    setImgTimestamp(Date.now());
     setRefreshKey((k) => k + 1);
   };
 
@@ -315,6 +383,8 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
   const retrievedAt = metadata?.retrieved_at ?? camera.retrieved_at;
   const capturedAtRaw = metadata?.captured_at || (camera as any).captured_at;
   const capturedAtDate = capturedAtRaw ? new Date(capturedAtRaw) : null;
+  const lastAttemptDate = metadata?.last_attempt_at ? new Date(metadata.last_attempt_at) : lastCheckTime;
+  const lastSuccessDate = metadata?.last_success_at ? new Date(metadata.last_success_at) : null;
 
   return (
     <div
@@ -369,19 +439,44 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
               {getRiskBadge(camera.risk_level)}
               {getImageAccessBadge()}
               {getEligibilityBadge()}
+              <div
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-indigo-50/90 text-indigo-700 border border-indigo-200/90 shadow-glass-sm"
+                title="Camera đang mở chi tiết được ưu tiên nạp ảnh định kỳ mỗi 60 giây"
+              >
+                <span className={`w-2 h-2 rounded-full bg-emerald-500 ${isAutoRefreshing ? "animate-ping" : "animate-pulse"}`} />
+                <span>Kiểm tra ảnh tự động mỗi ~1 phút</span>
+              </div>
             </div>
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 text-xs font-mono text-ink-600">
-              <div className="flex items-center gap-1.5" title="Thời điểm hệ thống SafePathAI nạp snapshot">
-                <Clock className="w-3.5 h-3.5 text-indigo-500" />
-                <span>Truy xuất: {observationTime(retrievedAt)}</span>
+              <div className="flex items-center gap-1.5" title="Thời điểm bộ lập lịch vừa kiểm tra nguồn camera">
+                <RefreshCw className={`w-3.5 h-3.5 text-indigo-500 ${isAutoRefreshing ? "animate-spin" : ""}`} />
+                <span>
+                  Kiểm tra: {lastAttemptDate && !isNaN(lastAttemptDate.getTime())
+                    ? lastAttemptDate.toLocaleTimeString("vi-VN")
+                    : "Đang kiểm tra..."}
+                </span>
               </div>
-              <div className="flex items-center gap-1.5" title="Thời điểm camera ghi hình thực tế">
+              <div className="flex items-center gap-1.5" title="Thời điểm nhận ảnh mới thành công từ camera">
+                <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                <span>
+                  Nhận ảnh: {lastSuccessDate && !isNaN(lastSuccessDate.getTime())
+                    ? lastSuccessDate.toLocaleTimeString("vi-VN")
+                    : metadata?.has_image
+                    ? observationTime(retrievedAt)
+                    : "Chưa nhận"}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5" title="Thời điểm camera ghi hình thực tế nếu có watermark">
                 <Radio className="w-3.5 h-3.5 text-slate-400" />
                 <span>
                   Chụp: {capturedAtDate && !isNaN(capturedAtDate.getTime())
                     ? capturedAtDate.toLocaleTimeString("vi-VN")
-                    : "Chưa xác minh watermark"}
+                    : "Chưa xác minh"}
                 </span>
+              </div>
+              <div className="flex items-center gap-1.5" title="Thời điểm hệ thống SafePathAI nạp snapshot">
+                <FileCheck className="w-3.5 h-3.5 text-slate-400" />
+                <span>Truy xuất: {observationTime(retrievedAt)}</span>
               </div>
             </div>
 
@@ -529,11 +624,15 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
             ) : (
               <>
                 <img
-                  key={`${activeView}-${refreshKey}`}
-                  src={`${currentImageUrl}${currentImageUrl.includes("?") ? "&" : "?"}t=${refreshKey}`}
+                  key={`${activeView}-${imgTimestamp}`}
+                  src={`${currentImageUrl}${currentImageUrl.includes("?") ? "&" : "?"}t=${imgTimestamp}`}
                   alt={`Camera snapshot ${camera.name} (${activeView})`}
-                  className="w-full h-full object-cover"
-                  onError={() => setImageError(true)}
+                  className="w-full h-full object-cover transition-opacity duration-300"
+                  onError={() => {
+                    if (!hadValidImageRef.current) {
+                      setImageError(true);
+                    }
+                  }}
                 />
 
                 {/* Provenance Badge */}
@@ -753,9 +852,9 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                 ))}
               </div>
             ) : (
-              <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200/60 text-xs text-emerald-900 flex items-center gap-2">
-                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Không có sự cố giao thông nào được ghi nhận gần khu vực này trong 12 giờ qua.</span>
+              <div className="p-3 rounded-xl bg-slate-50/80 border border-slate-200/80 text-xs text-ink-700 flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-indigo-500 shrink-0" />
+                <span>{trafficNews?.message || "Chưa tìm thấy bản tin giao thông phù hợp trong các nguồn đang theo dõi."}</span>
               </div>
             )}
           </div>

@@ -6,6 +6,7 @@ import { ScatterplotLayer } from "@deck.gl/layers";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { CameraEvidence, Coordinates, MapSelectionMode, RiskLevel, RouteSegmentRisk, SafeRouteResponse } from "../types/contracts";
+import { registerActiveViewedCameras } from "../services/api";
 import { Camera, MapPin } from "lucide-react";
 import { hasVerifiedFloodObservation } from "../lib/observations";
 import GlassToggle, { CameraFilterMode } from "./Glass/GlassToggle";
@@ -628,6 +629,15 @@ export const MapContainer: React.FC<MapContainerProps> = ({
 
     const onMoveEnd = () => {
       if (containerRef.current) containerRef.current.dataset.mapZoom = map.getZoom().toFixed(3);
+      try {
+        if (map.getLayer("camera-points")) {
+          const rendered = map.queryRenderedFeatures(undefined, { layers: ["camera-points"] });
+          const ids = (rendered || []).slice(0, 10).map((f) => f.properties?.id).filter(Boolean);
+          if (ids.length > 0) {
+            registerActiveViewedCameras(ids, 90).catch(() => {});
+          }
+        }
+      } catch {}
       if (process.env.NODE_ENV !== "production") {
         try {
           if (map.getLayer("camera-points") && map.getLayer("camera-clusters")) {
@@ -889,7 +899,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
       </div>}
 
       {/* Floating Liquid Glass Controls: Floating Camera Toggle */}
-      <div className="map-camera-controls absolute top-3.5 right-14 z-10 flex flex-col items-end gap-2">
+      <div data-tour="camera-toggle" className="map-camera-controls absolute top-3.5 right-14 z-10 flex flex-col items-end gap-2">
         <GlassToggle
           checked={showCameras}
           onChange={handleToggleCameras}

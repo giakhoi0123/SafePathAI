@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 import "../styles/liquid-glass.css";
 import { AuthProvider } from "../context/AuthContext";
+import { OnboardingProvider } from "../components/onboarding/OnboardingProvider";
+import { OnboardingTour } from "../components/onboarding/OnboardingTour";
 
 export const metadata: Metadata = {
   title: "SafePathAI - Tuyến đường thông minh TP.HCM",
@@ -17,7 +19,12 @@ export default function RootLayout({
   return (
     <html lang="vi">
       <body className="min-h-screen bg-pearl-100 text-ink-900 antialiased selection:bg-indigo-600 selection:text-white">
-        <AuthProvider>{children}</AuthProvider>
+        <AuthProvider>
+          <OnboardingProvider>
+            {children}
+            <OnboardingTour />
+          </OnboardingProvider>
+        </AuthProvider>
       </body>
     </html>
   );

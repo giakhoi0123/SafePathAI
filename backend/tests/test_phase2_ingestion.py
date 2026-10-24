@@ -72,10 +72,10 @@ class TestCameraURLAndHeaders:
 
         assert url.startswith(settings.HCMC_CAMERA_BASE_URL)
         assert f"id={cam_id}" in url
-        assert "bg=black" in url
-        assert "w=300" in url
-        assert "h=230" in url
-        assert "t=" in url
+        # Phase 10: Canonical clean URL avoids clutter parameters (bg, w, h) that cause placeholder errors
+        assert "bg=black" not in url
+        assert "w=300" not in url
+        assert "h=230" not in url
 
     def test_get_camera_request_headers(self, monkeypatch):
         # Without cookie

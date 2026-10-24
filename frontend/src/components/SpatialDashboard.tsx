@@ -27,6 +27,7 @@ import { CameraEvidenceModal } from "./CameraEvidenceModal";
 import { NavigationGuidance } from "./NavigationGuidance";
 import { RouteResults } from "./RouteResults";
 import { PlaceSearchCombobox } from "./PlaceSearchCombobox";
+import { OnboardingHelpButton } from "./onboarding/OnboardingHelpButton";
 import {
   Navigation,
   Home,
@@ -391,6 +392,13 @@ export default function SafePathDashboard() {
               Quan trắc Camera
             </Link>
             <Link
+              href="/news"
+              data-tour="nav-news-link"
+              className="px-3 py-1.5 rounded-full text-xs font-semibold text-ink-700 hover:text-indigo-600 hover:bg-white/70 transition cursor-pointer"
+            >
+              Bản tin giao thông
+            </Link>
+            <Link
               href="/dashboard"
               className="px-3 py-1.5 rounded-full text-xs font-semibold text-ink-700 hover:text-indigo-600 hover:bg-white/70 transition cursor-pointer"
             >
@@ -401,6 +409,9 @@ export default function SafePathDashboard() {
 
         {/* Status Indicators & User Profile */}
         <div className="flex items-center gap-2.5">
+          {/* Onboarding Help Button */}
+          <OnboardingHelpButton variant="pill" />
+
           {/* Verified Cameras Counter Badge */}
           <div className="hidden sm:flex items-center gap-1.5 px-3 py-1 glass-pill rounded-full text-xs font-semibold text-ink-700 border border-white/90">
             <Layers className="w-3.5 h-3.5 text-indigo-600" />
@@ -601,6 +612,7 @@ export default function SafePathDashboard() {
               {/* Search Button */}
               <button
                 type="button"
+                data-tour="search-route-btn"
                 onClick={() => handleSearchRoute()}
                 disabled={isLoadingRoute || !origin || !destination}
                 className="aurora-btn-primary w-full mt-3 py-3.5 px-4 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-xs rounded-2xl flex items-center justify-center gap-2 cursor-pointer shadow-lg"
@@ -634,31 +646,33 @@ export default function SafePathDashboard() {
               )}
             </div>
 
-            {recommendedRoute ? (
-              <div ref={routeResultsRef} className="space-y-3.5 scroll-mt-3">
+            <div data-tour="nav-guidance" className="space-y-3.5">
+              {recommendedRoute ? (
+                <div ref={routeResultsRef} className="space-y-3.5 scroll-mt-3">
+                  <NavigationGuidance
+                    route={recommendedRoute}
+                    explanation={selectedRouteExplanation}
+                    latestAlert={latestAlertMessage}
+                    onPositionUpdate={setCurrentLocation}
+                  />
+                  <RouteResults
+                    selected={recommendedRoute}
+                    alternatives={alternativeRoutes}
+                    selectedStepIndex={selectedStepIndex}
+                    onSelect={handleSelectRoute}
+                    onSelectStep={setSelectedStepIndex}
+                    onSelectCamera={setSelectedCamera}
+                  />
+                </div>
+              ) : (
                 <NavigationGuidance
-                  route={recommendedRoute}
-                  explanation={selectedRouteExplanation}
+                  route={null}
+                  explanation=""
                   latestAlert={latestAlertMessage}
                   onPositionUpdate={setCurrentLocation}
                 />
-                <RouteResults
-                  selected={recommendedRoute}
-                  alternatives={alternativeRoutes}
-                  selectedStepIndex={selectedStepIndex}
-                  onSelect={handleSelectRoute}
-                  onSelectStep={setSelectedStepIndex}
-                  onSelectCamera={setSelectedCamera}
-                />
-              </div>
-            ) : (
-              <NavigationGuidance
-                route={null}
-                explanation=""
-                latestAlert={latestAlertMessage}
-                onPositionUpdate={setCurrentLocation}
-              />
-            )}
+              )}
+            </div>
 
             {/* Environmental Conditions Widget (Weather & Tide) */}
             <div className="glass-panel rounded-3xl p-3.5 space-y-2.5 border border-white/90 shadow-glass">

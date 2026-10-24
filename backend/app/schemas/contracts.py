@@ -178,6 +178,8 @@ class CameraImageMetadata(BaseModel):
     image_status_reason: str
     captured_at: Optional[datetime] = None
     retrieved_at: Optional[datetime] = None
+    last_attempt_at: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None
     analyzed_at: Optional[datetime] = None
     source_updated_at: Optional[datetime] = None
     model_status: Optional[str] = None
@@ -189,6 +191,7 @@ class CameraImageMetadata(BaseModel):
     enhancement_applied: bool = False
     model_pipeline: Optional[str] = None
     etag: Optional[str] = None
+    image_hash: Optional[str] = None
     content_length: Optional[int] = None
     mime_type: Optional[str] = None
 
@@ -209,6 +212,31 @@ class CameraSummary(BaseModel):
     analyzed_count: int = Field(..., description="Number of cameras processed by vision models")
     last_scheduler_cycle: Optional[datetime] = Field(default=None, description="Timestamp of latest scheduler fetch attempt")
     circuit_breaker_open: bool = Field(default=False, description="Whether HCMC traffic portal circuit breaker is open")
+    cycle_target_sec: int = Field(default=1800, description="Target full cycle duration in seconds (30m)")
+    cycle_checked_count: Optional[int] = Field(default=None, description="Number of cameras checked in current cycle")
+    cycle_pending_count: Optional[int] = Field(default=None, description="Number of cameras pending check in current cycle")
+
+
+class ActiveCameraRegisterRequest(BaseModel):
+    """Request to register cameras as actively viewed in viewport or modal for 60s priority refresh."""
+    model_config = ConfigDict(populate_by_name=True)
+    cam_ids: List[str] = Field(..., min_length=1, max_length=50, description="List of camera IDs")
+    ttl_seconds: int = Field(default=90, ge=10, le=3600, description="Priority lease duration in seconds")
+
+
+class ActiveRouteRegisterRequest(BaseModel):
+    """Request to register cameras along an active navigation route corridor for priority refresh."""
+    model_config = ConfigDict(populate_by_name=True)
+    cam_ids: List[str] = Field(..., min_length=1, max_length=100, description="List of camera IDs")
+    ttl_seconds: int = Field(default=900, ge=60, le=7200, description="Corridor lease duration in seconds")
+
+
+class ActiveCameraResponse(BaseModel):
+    """Status response for active camera priority registration."""
+    status: str = "ok"
+    registered_count: int
+    active_viewed_count: int
+    active_route_count: int
 
 
 class WeatherTideSignal(BaseModel):

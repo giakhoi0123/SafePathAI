@@ -5,6 +5,7 @@ const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 test.beforeEach(({ page }) => page.on("pageerror", (error) => console.error("PAGE ERROR:", error.stack)));
 
 test("live OSRM alternatives select their own geometry, camera toggle preserves route", async ({ page }) => {
+  test.setTimeout(60000);
   const response = await page.request.post(`${apiBase}/api/v1/routes/search`, { data: {
     origin: { lat: 10.7725, lng: 106.6980 }, destination: { lat: 10.8012, lng: 106.7115 },
   } });
@@ -23,6 +24,9 @@ test("live OSRM alternatives select their own geometry, camera toggle preserves 
   const firstId = await selected.getAttribute("data-selected-route-id");
   const firstGeometry = await selected.getAttribute("data-route-geometry-key");
   const firstExplanation = await page.getByTestId("route-explanation").textContent();
+  if (await page.locator("[data-testid='camera-evidence-modal']").isVisible()) {
+    await page.keyboard.press("Escape");
+  }
   await expect(page.getByRole("switch", { name: "Hiển thị camera" })).toHaveAttribute("aria-checked", "false");
   await expect(selected).toHaveAttribute("data-route-above-camera", "true");
   await page.getByRole("switch", { name: "Hiển thị camera" }).click();

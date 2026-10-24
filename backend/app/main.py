@@ -53,6 +53,9 @@ from backend.app.db.session import (
     init_db,
 )
 from backend.app.schemas.contracts import (
+    ActiveCameraRegisterRequest,
+    ActiveCameraResponse,
+    ActiveRouteRegisterRequest,
     CameraEvidence,
     CameraImageMetadata,
     CameraSummary,
@@ -104,7 +107,14 @@ from backend.app.services.weather_tide import (
 )
 from backend.app.services.traffic_news import (
     NearbyTrafficNewsResponse,
+    TrafficNewsHighlightsResponse,
+    TrafficNewsListResponse,
+    TrafficNewsSummaryResponse,
+    fetch_aggregated_hcm_traffic_news,
     get_nearby_traffic_news,
+    get_traffic_news_highlights,
+    get_traffic_news_summary,
+    list_all_traffic_news,
 )
 
 logger = logging.getLogger("safepath.api")
@@ -149,19 +159,23 @@ broadcaster = AlertBroadcaster()
 
 
 # ==============================================================================
-# Periodic Background Worker Loop
+# Decoupled Background Workers (Fetch, Vision, Weather, News)
 # ==============================================================================
-async def background_camera_worker_loop(stop_event: asyncio.Event) -> None:
+vision_inference_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+
+
+async def background_camera_fetch_worker_loop(stop_event: asyncio.Event) -> None:
     """
-    Autonomous background worker that periodically:
-    1. If CAMERA_INGESTION_PERMITTED: scrapes active cameras and runs Computer Vision.
-       Else: transparently logs PERMISSION_UNVERIFIED and skips scraping.
-    2. Syncs real-time weather and tide signals to Redis.
+    Autonomous Fetch Scheduler:
+    - Rotates across all 796 verified PostGIS camera nodes with 30-minute target cycle.
+    - Paces requests (~8 cameras per batch every 18 seconds) within provider rate limits.
+    - Applies CameraUrlResolver (canonical first, then variants) to recover camera images.
+    - Enqueues valid non-placeholder frames for decoupled Computer Vision processing.
     """
-    logger.info("Starting background camera worker daemon...")
+    logger.info("Starting background camera fetch worker daemon (30m target cycle)...")
     while not stop_event.is_set():
         try:
-            # 0. Evict stale snapshots past retention threshold
+            # Evict stale snapshots past retention threshold once an hour
             try:
                 evicted = evict_stale_disk_images("storage/cams", max_hours=settings.CAMERA_DISK_EVICTION_MAX_HOURS)
                 if evicted > 0:
@@ -169,7 +183,6 @@ async def background_camera_worker_loop(stop_event: asyncio.Event) -> None:
             except Exception as e:
                 logger.debug("Disk eviction skipped: %s", e)
 
-            # 1. Camera Ingestion & Vision Processing (Fair Rotating Batches via CameraScheduler)
             can_scrape = (settings.CAMERA_INGESTION_PERMITTED or settings.CAMERA_ALLOW_VIEW_ONLY)
             if can_scrape and portal_circuit_breaker.can_request():
                 redis = get_redis_client()
@@ -179,48 +192,32 @@ async def background_camera_worker_loop(stop_event: asyncio.Event) -> None:
                             session=session,
                             redis=redis,
                             batch_size=getattr(settings, "CAMERA_BATCH_SIZE", 8),
-                            worker_id="safepath-daemon-1",
+                            worker_id="safepath-fetch-daemon",
                         )
                     if cams:
-                        scraped = await scrape_active_cameras(cams)
-                        # Record all fetch attempts & backoff state in PostgreSQL
+                        scraped = await scrape_active_cameras(cams, redis=redis)
                         async with AsyncSessionLocal() as session:
                             for s in scraped:
                                 await camera_scheduler.record_result(session=session, res=s, redis=redis)
 
-                        # Decoupled CV pipeline: only analyze valid non-placeholder frames
-                        valid_scraped = [
-                            s.to_dict() for s in scraped
-                            if s.is_valid_image and s.validation_status != "PLACEHOLDER_FRAME"
-                        ]
-                        if valid_scraped:
-                            vision_results = await process_all_cameras_vision(valid_scraped, redis_client=redis)
-                            async with AsyncSessionLocal() as session:
-                                for ev in vision_results:
-                                    await camera_scheduler.record_vision_completion(
-                                        session=session,
-                                        cam_id=ev.cam_id,
-                                        model_status=ev.model_status or "INFERENCE_COMPLETED",
-                                        image_hash=getattr(ev, "image_url", None),
-                                    )
+                        # Enqueue valid non-placeholder frames for Vision Worker
+                        for s in scraped:
+                            if s.is_valid_image and s.validation_status != "PLACEHOLDER_FRAME":
+                                try:
+                                    vision_inference_queue.put_nowait(s.to_dict())
+                                except asyncio.QueueFull:
+                                    logger.debug("Vision queue full, skipping frame buffer.")
                 except Exception as exc:
-                    logger.warning("Camera ingestion/vision batch error: %s", exc)
+                    logger.warning("Camera fetch batch error: %s", exc)
                 finally:
                     if redis is not None:
                         await redis.aclose()
             elif not can_scrape:
-                logger.debug("Camera ingestion disabled: CAMERA_INGESTION_PERMITTED=false and CAMERA_ALLOW_VIEW_ONLY=false.")
+                logger.debug("Camera ingestion disabled by configuration.")
             else:
-                logger.debug("Camera ingestion temporarily paused: portal circuit breaker is OPEN.")
+                logger.debug("Camera ingestion paused: portal circuit breaker is OPEN.")
 
-            # 2. Sync weather and tide signal
-            redis = get_redis_client()
-            try:
-                await sync_weather_tide_to_redis(redis_client=redis)
-            finally:
-                await redis.aclose()
-
-            # Wait for scrape interval or cancellation
+            # Pacing delay: 18 seconds for ~100 batches per 1800s (30m)
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=float(settings.CAMERA_SCRAPE_INTERVAL_SEC))
             except asyncio.TimeoutError:
@@ -228,10 +225,121 @@ async def background_camera_worker_loop(stop_event: asyncio.Event) -> None:
         except asyncio.CancelledError:
             break
         except Exception as exc:
-            logger.warning("Error in background worker iteration: %s", exc)
+            logger.warning("Error in camera fetch worker iteration: %s", exc)
             await asyncio.sleep(5.0)
 
-    logger.info("Background camera worker daemon stopped.")
+    logger.info("Background camera fetch worker daemon stopped.")
+
+
+async def background_vision_worker_loop(stop_event: asyncio.Event) -> None:
+    """
+    Decoupled Computer Vision Worker:
+    Consumes verified valid camera frames and runs YOLO vehicle detection
+    without blocking camera image fetching.
+    """
+    logger.info("Starting background Computer Vision worker daemon...")
+    while not stop_event.is_set():
+        try:
+            batch: List[Dict[str, Any]] = []
+            try:
+                # Wait for at least one item
+                first = await asyncio.wait_for(vision_inference_queue.get(), timeout=2.0)
+                batch.append(first)
+                vision_inference_queue.task_done()
+                # Drain up to 3 more items without waiting
+                while len(batch) < 4 and not vision_inference_queue.empty():
+                    item = vision_inference_queue.get_nowait()
+                    batch.append(item)
+                    vision_inference_queue.task_done()
+            except asyncio.TimeoutError:
+                continue
+
+            if batch:
+                redis = get_redis_client()
+                try:
+                    vision_results = await process_all_cameras_vision(batch, redis_client=redis)
+                    async with AsyncSessionLocal() as session:
+                        for ev in vision_results:
+                            await camera_scheduler.record_vision_completion(
+                                session=session,
+                                cam_id=ev.cam_id,
+                                model_status=ev.model_status or "INFERENCE_COMPLETED",
+                                image_hash=getattr(ev, "image_url", None),
+                            )
+                except Exception as exc:
+                    logger.warning("Vision worker inference batch error: %s", exc)
+                finally:
+                    if redis is not None:
+                        await redis.aclose()
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("Error in vision worker iteration: %s", exc)
+            await asyncio.sleep(2.0)
+
+    logger.info("Background Computer Vision worker daemon stopped.")
+
+
+async def background_weather_worker_loop(stop_event: asyncio.Event) -> None:
+    """
+    Independent Weather & Tide Worker:
+    Periodically syncs real-world Open-Meteo rain and tidal predictions
+    on an independent 5-minute freshness schedule.
+    """
+    logger.info("Starting background weather & tide worker daemon...")
+    while not stop_event.is_set():
+        try:
+            redis = get_redis_client()
+            try:
+                await sync_weather_tide_to_redis(redis_client=redis)
+            except Exception as exc:
+                logger.warning("Weather worker sync error: %s", exc)
+            finally:
+                if redis is not None:
+                    await redis.aclose()
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=300.0)  # 5 minutes
+            except asyncio.TimeoutError:
+                pass
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("Error in weather worker iteration: %s", exc)
+            await asyncio.sleep(10.0)
+
+    logger.info("Background weather & tide worker daemon stopped.")
+
+
+async def background_news_worker_loop(stop_event: asyncio.Event) -> None:
+    """
+    Independent Traffic News Worker:
+    Periodically aggregates, categorizes, and persists real traffic news & municipal alerts
+    from verified sources on an independent 15-minute schedule.
+    """
+    logger.info("Starting background traffic news worker daemon...")
+    while not stop_event.is_set():
+        try:
+            redis = get_redis_client()
+            try:
+                await fetch_aggregated_hcm_traffic_news()
+            except Exception as exc:
+                logger.warning("News worker aggregation error: %s", exc)
+            finally:
+                if redis is not None:
+                    await redis.aclose()
+
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=900.0)  # 15 minutes
+            except asyncio.TimeoutError:
+                pass
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.warning("Error in news worker iteration: %s", exc)
+            await asyncio.sleep(30.0)
+
+    logger.info("Background traffic news worker daemon stopped.")
 
 
 # ==============================================================================
@@ -242,20 +350,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Manages application startup and graceful shutdown."""
     logger.info("Initializing SafePathAI Backend Infrastructure...")
     await init_db()
+    try:
+        from backend.app.services.news_sources.hcm_geocoding import HcmPostgisGeocodingIndex
+        await HcmPostgisGeocodingIndex.get_instance().ensure_loaded()
+    except Exception as exc:
+        logger.warning("Geocoding index prewarm deferred: %s", exc)
     app.state.osrm_client = httpx.AsyncClient(timeout=8.0, limits=httpx.Limits(max_connections=100, max_keepalive_connections=20))
 
     stop_event = asyncio.Event()
-    worker_task = asyncio.create_task(background_camera_worker_loop(stop_event))
+    worker_tasks = [
+        asyncio.create_task(background_camera_fetch_worker_loop(stop_event)),
+        asyncio.create_task(background_vision_worker_loop(stop_event)),
+        asyncio.create_task(background_weather_worker_loop(stop_event)),
+        asyncio.create_task(background_news_worker_loop(stop_event)),
+    ]
 
     yield
 
     # Teardown
     stop_event.set()
-    worker_task.cancel()
-    try:
-        await worker_task
-    except asyncio.CancelledError:
-        pass
+    for task in worker_tasks:
+        task.cancel()
+    await asyncio.gather(*worker_tasks, return_exceptions=True)
 
     await app.state.osrm_client.aclose()
     await close_db()
@@ -501,6 +617,81 @@ async def get_traffic_news_nearby(
 
 
 @app.get(
+    "/api/v1/traffic-news/highlights",
+    response_model=TrafficNewsHighlightsResponse,
+    summary="Get verified high-signal traffic news highlights for hero and spotlight",
+    tags=["Environmental"],
+)
+async def get_traffic_news_highlights_endpoint(
+    limit: int = Query(5, ge=1, le=20, description="Highlight items count"),
+) -> TrafficNewsHighlightsResponse:
+    """
+    Returns prioritized highlight articles (active hazards, verified locations, fresh images).
+    """
+    redis = get_redis_client()
+    try:
+        return await get_traffic_news_highlights(limit=limit, redis_client=redis)
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
+@app.get(
+    "/api/v1/traffic-news/summary",
+    response_model=TrafficNewsSummaryResponse,
+    summary="Get aggregated traffic news metrics, categories, and source statuses",
+    tags=["Environmental"],
+)
+async def get_traffic_news_summary_endpoint() -> TrafficNewsSummaryResponse:
+    """
+    Returns statistics, incident breakdown by category, and real-time source statuses.
+    """
+    redis = get_redis_client()
+    try:
+        return await get_traffic_news_summary(redis_client=redis)
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
+@app.get(
+    "/api/v1/traffic-news",
+    response_model=TrafficNewsListResponse,
+    summary="Get verified traffic news and incident list with pagination and filters",
+    tags=["Environmental"],
+)
+async def get_all_traffic_news(
+    limit: int = Query(30, ge=1, le=100, description="Page limit"),
+    offset: int = Query(0, ge=0, description="Page offset"),
+    category: Optional[str] = Query(None, description="Filter by category (e.g. FLOOD, CONGESTION, ACCIDENT, ROAD_CLOSURE)"),
+    timeframe: Optional[str] = Query(None, description="Filter by timeframe: 24h, 7d, 30d, all"),
+    search: Optional[str] = Query(None, description="Search keyword in title, summary, street"),
+    lat: Optional[float] = Query(None, ge=-90.0, le=90.0, description="Optional GPS latitude for proximity filter"),
+    lng: Optional[float] = Query(None, ge=-180.0, le=180.0, description="Optional GPS longitude for proximity filter"),
+    radius_km: Optional[float] = Query(None, ge=0.5, le=50.0, description="Proximity radius in km (default 5km)"),
+) -> TrafficNewsListResponse:
+    """
+    Returns verified municipal and news alerts for HCMC with pagination, category, timeframe, and search filters.
+    """
+    redis = get_redis_client()
+    try:
+        return await list_all_traffic_news(
+            limit=limit,
+            offset=offset,
+            category=category,
+            timeframe=timeframe,
+            search=search,
+            lat=lat,
+            lng=lng,
+            radius_km=radius_km,
+            redis_client=redis,
+        )
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
+@app.get(
     "/api/v1/admin/camera-ingestion/status",
     summary="Get camera ingestion health and scheduler metrics",
     tags=["Surveillance"],
@@ -537,20 +728,22 @@ async def get_cameras_summary(
     and circuit breaker status.
     """
     now = datetime.now(timezone.utc)
-    recent_15m = now - timedelta(minutes=15)
+    cycle_target_sec = getattr(settings, "CAMERA_REFRESH_TARGET_SEC", 1800)
+    recent_cycle = now - timedelta(seconds=cycle_target_sec)
 
     stmt = text("""
         SELECT 
             (SELECT count(*) FROM traffic_cameras) AS total_registered,
             (SELECT count(*) FROM traffic_cameras WHERE geom IS NOT NULL) AS valid_gps_count,
             (SELECT count(*) FROM camera_ingestion_state WHERE last_attempt_at IS NOT NULL) AS checked_count,
-            (SELECT count(*) FROM camera_ingestion_state WHERE source_status = 'LIVE' AND last_success_at >= :recent_15m) AS valid_images_count,
-            (SELECT count(*) FROM camera_ingestion_state WHERE source_status = 'LIVE' AND (last_success_at IS NULL OR last_success_at < :recent_15m)) AS stale_images_count,
+            (SELECT count(*) FROM camera_ingestion_state WHERE source_status = 'LIVE' AND last_success_at >= :recent_cycle) AS valid_images_count,
+            (SELECT count(*) FROM camera_ingestion_state WHERE source_status = 'LIVE' AND (last_success_at IS NULL OR last_success_at < :recent_cycle)) AS stale_images_count,
             (SELECT count(*) FROM camera_ingestion_state WHERE source_status = 'OFFLINE') AS unavailable_count,
             (SELECT count(*) FROM camera_ingestion_state WHERE model_status IS NOT NULL) AS analyzed_count,
+            (SELECT count(*) FROM camera_ingestion_state WHERE last_attempt_at >= :recent_cycle) AS cycle_checked_count,
             (SELECT max(last_attempt_at) FROM camera_ingestion_state) AS last_scheduler_cycle
     """)
-    res = await session.execute(stmt, {"recent_15m": recent_15m})
+    res = await session.execute(stmt, {"recent_cycle": recent_cycle})
     row = res.fetchone()
 
     total_registered = row.total_registered if row else 0
@@ -560,6 +753,8 @@ async def get_cameras_summary(
     stale_images_count = row.stale_images_count if row else 0
     unavailable_count = (row.unavailable_count if row else 0) + (total_registered - checked_count)
     analyzed_count = row.analyzed_count if row else 0
+    cycle_checked_count = row.cycle_checked_count if row else 0
+    cycle_pending_count = max(0, total_registered - cycle_checked_count)
     last_scheduler_cycle = row.last_scheduler_cycle if row else None
 
     return CameraSummary(
@@ -572,7 +767,90 @@ async def get_cameras_summary(
         analyzed_count=analyzed_count,
         last_scheduler_cycle=last_scheduler_cycle,
         circuit_breaker_open=(portal_circuit_breaker.state == "OPEN"),
+        cycle_target_sec=cycle_target_sec,
+        cycle_checked_count=cycle_checked_count,
+        cycle_pending_count=cycle_pending_count,
     )
+
+
+@app.post(
+    "/api/v1/cameras/active-view",
+    response_model=ActiveCameraResponse,
+    summary="Register camera IDs as actively viewed for 60s priority refresh",
+    tags=["Surveillance"],
+)
+async def register_active_view(request: ActiveCameraRegisterRequest) -> ActiveCameraResponse:
+    """
+    Registers cameras that the user is currently viewing in a modal or viewport.
+    Places them in Tier 0 (Active Viewed) in Redis with automatic TTL expiration,
+    allowing the scheduler to refresh them every 60 seconds.
+    """
+    redis = get_redis_client()
+    try:
+        registered = await camera_scheduler.register_active_viewed_cameras(
+            redis=redis,
+            cam_ids=request.cam_ids,
+            ttl_seconds=request.ttl_seconds,
+        )
+        viewed, route = await camera_scheduler.get_active_priority_camera_ids(redis)
+        return ActiveCameraResponse(
+            status="ok",
+            registered_count=registered,
+            active_viewed_count=len(viewed),
+            active_route_count=len(route),
+        )
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
+@app.delete(
+    "/api/v1/cameras/{cam_id}/active-view",
+    summary="Unregister camera from active view priority",
+    tags=["Surveillance"],
+)
+async def unregister_active_view(cam_id: str) -> Dict[str, Any]:
+    """
+    Removes a camera from the active priority set when the user closes its modal or pans away.
+    """
+    redis = get_redis_client()
+    try:
+        await camera_scheduler.unregister_active_viewed_camera(redis=redis, cam_id=cam_id)
+        return {"status": "ok", "cam_id": cam_id}
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
+@app.post(
+    "/api/v1/cameras/active-route",
+    response_model=ActiveCameraResponse,
+    summary="Register cameras along navigation route corridor for priority refresh",
+    tags=["Surveillance"],
+)
+async def register_active_route(request: ActiveRouteRegisterRequest) -> ActiveCameraResponse:
+    """
+    Registers cameras situated along an active navigation route corridor.
+    Places them in Tier 1 in Redis for prioritized 60-second refreshes while navigating.
+    """
+    redis = get_redis_client()
+    try:
+        registered = await camera_scheduler.register_active_route_cameras(
+            redis=redis,
+            cam_ids=request.cam_ids,
+            ttl_seconds=request.ttl_seconds,
+        )
+        viewed, route = await camera_scheduler.get_active_priority_camera_ids(redis)
+        return ActiveCameraResponse(
+            status="ok",
+            registered_count=registered,
+            active_viewed_count=len(viewed),
+            active_route_count=len(route),
+        )
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
 
 
 @app.get(
@@ -968,6 +1246,8 @@ async def get_camera_metadata(
         if redis is not None:
             await redis.aclose()
 
+    val = None
+    image_hash = None
     if has_local:
         try:
             with open(local_path, "rb") as f:
@@ -975,6 +1255,7 @@ async def get_camera_metadata(
             val = validate_camera_image_bytes(content)
             if val.is_valid:
                 has_local = True
+                image_hash = val.md5_hash
                 etag = f'"{val.md5_hash}"'
                 content_length = len(content)
                 mime_type = "image/jpeg" if val.format == "JPEG" else f"image/{val.format.lower() if val.format else 'jpeg'}"
@@ -1051,6 +1332,8 @@ async def get_camera_metadata(
         image_status_reason=image_status_reason,
         captured_at=captured_at,
         retrieved_at=retrieved_at,
+        last_attempt_at=ing_row.last_attempt_at if ing_row else None,
+        last_success_at=ing_row.last_success_at if ing_row else None,
         analyzed_at=datetime.fromisoformat(redis_data["analyzed_at"]) if (redis_data and redis_data.get("analyzed_at")) else None,
         source_updated_at=None,
         model_status=redis_data.get("model_status", "NOT_ANALYZED") if redis_data else "NOT_ANALYZED",
@@ -1062,6 +1345,7 @@ async def get_camera_metadata(
         enhancement_applied=enhancement_applied,
         model_pipeline=model_pipeline,
         etag=etag,
+        image_hash=image_hash,
         content_length=content_length,
         mime_type=mime_type,
     )
@@ -1110,6 +1394,24 @@ async def search_safe_route(
         alternative_routes = routes[1:]
 
         recommended_route.alternative_routes = alternative_routes
+
+        # Automatically register cameras along active route corridor for 60s priority refresh
+        try:
+            corridor_cam_ids = set()
+            for r in routes:
+                for seg in (getattr(r, "segments", []) or []):
+                    for cam in (getattr(seg, "evidence_cameras", []) or []):
+                        cid = getattr(cam, "cam_id", None)
+                        if cid:
+                            corridor_cam_ids.add(str(cid))
+            if corridor_cam_ids and redis is not None:
+                await camera_scheduler.register_active_route_cameras(
+                    redis=redis,
+                    cam_ids=list(corridor_cam_ids),
+                    ttl_seconds=900,
+                )
+        except Exception as reg_exc:
+            logger.debug("Failed to auto-register route corridor cameras: %s", reg_exc)
 
         return recommended_route
     finally:

@@ -36,7 +36,7 @@ from backend.app.services.vision import (
     preprocess_camera_image,
 )
 
-EXPECTED_YOLO_SHA256 = "04f0e55c26f58d17145b36045780fe1250d5bd2187543e11568e5141d05b3262"
+EXPECTED_YOLO_SHA256 = "18eac704c629a851c0689ebd9164a12c4ef6ad6b5959b299c32f917815fc49b7"
 MANIFEST_PATH = "data/models/model_manifest.json"
 
 
@@ -106,19 +106,19 @@ class TestModelManifestAndIntegrity:
         assert "flood_segmenter" in models
 
         veh = models["vehicle_detector"]
-        assert veh["model_name"] == "yolov5n.onnx"
+        assert veh["model_name"] == "yolo26n.onnx"
         assert veh["model_type"] == "YOLO_OBJECT_DETECTION"
         assert veh["format"] == "ONNX"
         assert veh["sha256"] == EXPECTED_YOLO_SHA256
-        assert "GPL" in veh["license"]
+        assert "AGPL" in veh["license"] or "Enterprise" in veh["license"]
         assert veh["expected_input"]["shape"] == [1, 3, 640, 640]
-        assert veh["expected_input"]["dtype"] == "float16"
+        assert veh["expected_input"]["dtype"] == "float32"
 
         flood = models["flood_segmenter"]
         assert flood["provenance_status"] == "MODEL_UNAVAILABLE"
         assert flood["sha256"] is None
 
-    def test_yolov5n_file_hash(self, real_yolo_path):
+    def test_yolo26n_file_hash(self, real_yolo_path):
         hasher = hashlib.sha256()
         with open(real_yolo_path, "rb") as f:
             while chunk := f.read(65536):
@@ -133,7 +133,7 @@ class TestModelManifestAndIntegrity:
 # 2. Real ONNX Runtime Inference Session Tests
 # ==============================================================================
 class TestRealONNXInference:
-    """Verifies real execution of ONNX Runtime on verified YOLOv5n weights."""
+    """Verifies real execution of ONNX Runtime on verified YOLO26n weights."""
 
     def test_onnx_session_initialization(self, real_yolo_path):
         detector = VehicleDetector(model_path=real_yolo_path, fallback_to_heuristic=False)
@@ -146,14 +146,14 @@ class TestRealONNXInference:
         assert len(inputs) == 1
         assert inputs[0].name == "images"
         assert inputs[0].shape == [1, 3, 640, 640]
-        assert "float16" in inputs[0].type
+        assert "float" in inputs[0].type
 
         # Inspect output tensor
         outputs = detector.session.get_outputs()
         assert len(outputs) == 1
         assert outputs[0].name == "output0"
-        assert outputs[0].shape == [1, 25200, 85]
-        assert "float16" in outputs[0].type
+        assert outputs[0].shape == [1, 84, 8400]
+        assert "float" in outputs[0].type
 
     def test_onnx_forward_pass_and_latency(self, real_yolo_path, test_frames_dir):
         detector = VehicleDetector(model_path=real_yolo_path, fallback_to_heuristic=False)

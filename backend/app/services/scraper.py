@@ -19,6 +19,10 @@ import httpx
 
 from backend.app.core.config import settings
 from backend.app.schemas.contracts import DataSourceStatus, EvidenceEligibility, ImageAccessStatus
+from backend.app.services.camera_url_resolver import (
+    get_canonical_camera_url,
+    resolve_camera_image,
+)
 from backend.app.services.image_validator import (
     ImageValidationResult,
     ImageValidationStatus,
@@ -117,6 +121,7 @@ class ScrapedCameraResult:
     capture_time_status: str
     file_size: int
     is_valid_image: bool
+    is_new_snapshot: bool = True
     validation_status: Optional[str] = None
     error_message: Optional[str] = None
     image_access_status: ImageAccessStatus = ImageAccessStatus.UNAVAILABLE
@@ -139,6 +144,7 @@ class ScrapedCameraResult:
             "capture_time_status": self.capture_time_status,
             "file_size": self.file_size,
             "is_valid_image": self.is_valid_image,
+            "is_new_snapshot": self.is_new_snapshot,
             "validation_status": self.validation_status,
             "error_message": self.error_message,
             "image_access_status": self.image_access_status.value,
@@ -150,11 +156,10 @@ class ScrapedCameraResult:
 
 def build_camera_image_url(cam_id: str) -> str:
     """
-    Constructs the exact URL used by the HCMC Traffic Portal port 8007 image handler.
-    Format: {BASE_URL}?id={cam_id}&bg=black&w=300&h=230&t={timestamp_ms}
+    Constructs the canonical clean URL for HCMC Traffic Portal.
+    Avoids fixed clutter parameters (bg, w, h) that trigger 'IMAGE NOT AVAILABLE'.
     """
-    ts_ms = int(time.time() * 1000)
-    return f"{settings.HCMC_CAMERA_BASE_URL}?id={cam_id}&bg=black&w=300&h=230&t={ts_ms}"
+    return get_canonical_camera_url(cam_id)
 
 
 def get_camera_request_headers() -> Dict[str, str]:
@@ -218,6 +223,7 @@ async def scrape_camera_image(
     previous_md5: Optional[str] = None,
     previous_dhash: Optional[str] = None,
     allow_view_only: Optional[bool] = None,
+    redis: Optional[Any] = None,
 ) -> ScrapedCameraResult:
     """
     Downloads snapshot for a single camera applying strict validation and zero mock:
@@ -275,6 +281,8 @@ async def scrape_camera_image(
                 cached_bytes = f.read()
             val_result = validate_camera_image_bytes(cached_bytes)
             if val_result.is_valid:
+                mtime = os.path.getmtime(local_image_path)
+                cached_retrieved_at = datetime.fromtimestamp(mtime, tz=timezone.utc)
                 return ScrapedCameraResult(
                     cam_id=cam_id,
                     code=code,
@@ -285,11 +293,12 @@ async def scrape_camera_image(
                     image_path=local_image_path,
                     image_bytes=cached_bytes,
                     source_status=DataSourceStatus.STALE,
-                    retrieved_at=now,
+                    retrieved_at=cached_retrieved_at,
                     captured_at=None,
                     capture_time_status="CAPTURE_TIME_UNKNOWN",
                     file_size=len(cached_bytes),
                     is_valid_image=True,
+                    is_new_snapshot=False,
                     validation_status="VALID_LOCAL_ARCHIVE",
                     error_message="PERMISSION_UNVERIFIED: Ingestion disabled by configuration.",
                     image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
@@ -329,6 +338,8 @@ async def scrape_camera_image(
                     cached_bytes = f.read()
                 val_result = validate_camera_image_bytes(cached_bytes)
                 if val_result.is_valid:
+                    mtime = os.path.getmtime(local_image_path)
+                    cached_retrieved_at = datetime.fromtimestamp(mtime, tz=timezone.utc)
                     return ScrapedCameraResult(
                         cam_id=cam_id,
                         code=code,
@@ -339,11 +350,12 @@ async def scrape_camera_image(
                         image_path=local_image_path,
                         image_bytes=cached_bytes,
                         source_status=DataSourceStatus.STALE,
-                        retrieved_at=now,
+                        retrieved_at=cached_retrieved_at,
                         captured_at=None,
                         capture_time_status="CAPTURE_TIME_UNKNOWN",
                         file_size=len(cached_bytes),
                         is_valid_image=True,
+                        is_new_snapshot=False,
                         validation_status="VALID_LOCAL_STALE",
                         error_message="Circuit breaker active; serving local cache.",
                         image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
@@ -376,28 +388,35 @@ async def scrape_camera_image(
             image_status_reason="EXTERNAL_ACCESS_RESTRICTED",
         )
 
-    # 3. Attempt live download over TLS (verify=True)
-    target_url = build_camera_image_url(cam_id)
+    # 3. Attempt live download over TLS via adaptive camera_url_resolver
     headers = get_camera_request_headers()
+    provider_url = cam.get("provider_snapshot_url") or cam.get("source_uri")
     download_err: Optional[str] = None
     val_result: Optional[ImageValidationResult] = None
     status_reason: str = "IMAGE_UNAVAILABLE"
 
     try:
-        response = await client.get(target_url, headers=headers)
-        if response.status_code == 200:
+        res = await resolve_camera_image(
+            client=client,
+            cam_id=cam_id,
+            provider_url=provider_url,
+            redis=redis,
+            request_headers=headers,
+        )
+
+        if res.is_valid_image and res.image_bytes:
             portal_circuit_breaker.record_success()
             val_result = validate_camera_image_bytes(
-                response.content,
+                res.image_bytes,
                 previous_md5=previous_md5,
                 previous_dhash=previous_dhash,
             )
             if val_result.is_valid:
                 # Valid frame! Save to disk atomically
                 with open(local_image_path, "wb") as f:
-                    f.write(response.content)
+                    f.write(res.image_bytes)
 
-                etag_val = val_result.md5_hash
+                etag_val = val_result.md5_hash or res.content_hash
 
                 if val_result.captured_at is not None:
                     is_fresh = (now - val_result.captured_at).total_seconds() <= settings.CAMERA_IMAGE_TTL_SECONDS
@@ -422,13 +441,14 @@ async def scrape_camera_image(
                     lat=lat,
                     lng=lng,
                     image_path=local_image_path,
-                    image_bytes=response.content,
+                    image_bytes=res.image_bytes,
                     source_status=source_st,
                     retrieved_at=now,
                     captured_at=val_result.captured_at,
                     capture_time_status=capture_time_status,
-                    file_size=len(response.content),
+                    file_size=res.byte_length,
                     is_valid_image=True,
+                    is_new_snapshot=True,
                     validation_status=val_result.status.value,
                     error_message=None,
                     image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
@@ -436,23 +456,19 @@ async def scrape_camera_image(
                     image_status_reason="VALID_IMAGE_CACHED",
                     etag=etag_val,
                 )
-            else:
-                if val_result.status == ImageValidationStatus.PLACEHOLDER_ERROR_FRAME:
-                    status_reason = "PLACEHOLDER_FRAME"
-                    download_err = "Server returned 'IMAGE NOT AVAILABLE' placeholder frame"
-                else:
-                    status_reason = val_result.status.value
-                    download_err = f"Validation failed ({val_result.status.value}): {val_result.error_message}"
-                logger.warning("Camera %s received invalid frame: %s", cam_id, download_err)
-        elif response.status_code in (403, 429):
-            portal_circuit_breaker.record_failure(response.status_code)
+        elif res.http_status in (403, 429):
+            portal_circuit_breaker.record_failure(res.http_status)
             status_reason = "EXTERNAL_ACCESS_RESTRICTED"
-            download_err = f"HTTP {response.status_code} (Rate limited / Forbidden by portal)"
+            download_err = f"HTTP {res.http_status} (Rate limited / Forbidden by portal)"
             logger.warning("Camera %s rate limited or forbidden: %s", cam_id, download_err)
+        elif res.failure_reason and "PLACEHOLDER" in res.failure_reason.upper():
+            status_reason = "PLACEHOLDER_FRAME"
+            download_err = "Server returned 'IMAGE NOT AVAILABLE' placeholder frame"
+            logger.warning("Camera %s received placeholder on candidate variants: %s", cam_id, download_err)
         else:
             status_reason = "NETWORK_FAILURE"
-            download_err = f"HTTP {response.status_code}"
-            logger.warning("Camera %s download failed: %s", cam_id, download_err)
+            download_err = res.failure_reason or f"HTTP {res.http_status}"
+            logger.warning("Camera %s resolution failed: %s", cam_id, download_err)
 
     except Exception as exc:
         status_reason = "NETWORK_FAILURE"
@@ -466,6 +482,8 @@ async def scrape_camera_image(
                 stale_bytes = f.read()
             stale_val = validate_camera_image_bytes(stale_bytes)
             if stale_val.is_valid:
+                mtime = os.path.getmtime(local_image_path)
+                cached_retrieved_at = datetime.fromtimestamp(mtime, tz=timezone.utc)
                 return ScrapedCameraResult(
                     cam_id=cam_id,
                     code=code,
@@ -476,11 +494,12 @@ async def scrape_camera_image(
                     image_path=local_image_path,
                     image_bytes=stale_bytes,
                     source_status=DataSourceStatus.STALE,
-                    retrieved_at=now,
+                    retrieved_at=cached_retrieved_at,
                     captured_at=None,
                     capture_time_status="CAPTURE_TIME_UNKNOWN",
                     file_size=len(stale_bytes),
                     is_valid_image=True,
+                    is_new_snapshot=False,
                     validation_status="VALID_LOCAL_STALE",
                     error_message=download_err,
                     image_access_status=ImageAccessStatus.VIEWABLE_PUBLIC,
@@ -526,6 +545,7 @@ async def scrape_active_cameras(
     max_concurrency: Optional[int] = None,
     timeout_sec: Optional[float] = None,
     jitter_range: Tuple[float, float] = (0.2, 0.8),
+    redis: Optional[Any] = None,
 ) -> List[ScrapedCameraResult]:
     """
     Scrapes a batch of active cameras using httpx.AsyncClient with strict TLS verify=True,
@@ -545,7 +565,7 @@ async def scrape_active_cameras(
                 if jitter_range[1] > 0.0:
                     delay = random.uniform(jitter_range[0], jitter_range[1])
                     await asyncio.sleep(delay)
-                return await scrape_camera_image(client, cam_data, storage_dir=storage_dir)
+                return await scrape_camera_image(client, cam_data, storage_dir=storage_dir, redis=redis)
 
         tasks = [worker(c) for c in cameras]
         results = await asyncio.gather(*tasks)

@@ -48,14 +48,18 @@ class Settings(BaseSettings):
     CAMERA_ALLOW_VIEW_ONLY: bool = True
     # Only allow altering route risk scores if explicit verified permission and calibration exist
     CAMERA_ROUTING_EVIDENCE_PERMITTED: bool = False
-    # Freshness threshold: snapshots older than 180s (3m) are classified as STALE, never LIVE
-    CAMERA_IMAGE_TTL_SECONDS: int = 180
+    # Freshness threshold: snapshots within 30-minute target cycle are eligible
+    CAMERA_IMAGE_TTL_SECONDS: int = 1800
     # Storage retention threshold: clean up cached frames older than 24h
     CAMERA_DISK_EVICTION_MAX_HOURS: int = 24
 
+    CAMERA_REFRESH_TARGET_SEC: int = 1800
     CAMERA_REQUEST_TIMEOUT_SEC: float = 6.0
+    CAMERA_FETCH_TIMEOUT_SEC: float = 6.0
     CAMERA_MAX_CONCURRENCY: int = 4
-    CAMERA_SCRAPE_INTERVAL_SEC: int = 60
+    CAMERA_BATCH_SIZE: int = 8
+    CAMERA_SCRAPE_INTERVAL_SEC: int = 18
+    CAMERA_INGESTION_ENABLED: bool = True
 
     # Deprecated fallback flag kept False for strict Zero-Mock compliance
     USE_MOCK_CAMERA_FALLBACK: bool = False
@@ -69,6 +73,12 @@ class Settings(BaseSettings):
     CLAHE_TILE_GRID_SIZE: int = 8
     DENOISE_H: float = 3.0
     UNSHARP_STRENGTH: float = 0.45
+
+    # Computer Vision & Vehicle Detection Settings (YOLO26n)
+    YOLO_MODEL_PATH: str = "data/models/yolo26n.onnx"
+    YOLO_CONFIDENCE_THRESHOLD: float = 0.25
+    YOLO_MOTORCYCLE_CONF_THRESHOLD: float = 0.20
+    YOLO_NMS_IOU_THRESHOLD: float = 0.45
 
     # Large Language Model API Key (Gemini / OpenAI)
     LLM_API_KEY: str = ""

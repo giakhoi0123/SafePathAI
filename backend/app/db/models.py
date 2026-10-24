@@ -308,6 +308,37 @@ class UserRouteHistory(Base):
     user: Mapped["User"] = relationship("User", back_populates="route_history")
 
 
+class TrafficNewsArticle(Base):
+    """
+    Verified traffic news article and municipal incident announcement in TP.HCM.
+    Stores RFC 2822 published_at, fetched_at, resolved geolocation, category, and severity.
+    """
+    __tablename__ = "traffic_news_articles"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)
+    canonical_url: Mapped[str] = mapped_column(String(1024), unique=True, index=True, nullable=False)
+    source_name: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    severity: Mapped[str] = mapped_column(String(32), default="INFO", nullable=False)
+    event_status: Mapped[str] = mapped_column(String(32), default="GENERAL_NEWS", nullable=False)
+    published_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    fetched_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
+    latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    location_confidence: Mapped[str] = mapped_column(String(32), default="UNRESOLVED", nullable=False)
+    geocoding_status: Mapped[str] = mapped_column(String(32), default="UNRESOLVED", nullable=False)
+    verification_status: Mapped[str] = mapped_column(String(32), default="VERIFIED_SOURCE", nullable=False)
+    image_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    geom: Mapped[Any] = mapped_column(
+        Geometry(geometry_type="POINT", srid=4326, spatial_index=True),
+        nullable=True,
+    )
+
+
 # PostGIS Spatial CTE Query for finding the nearest road segment within a given radius in meters
 MAP_CAMERAS_POSTGIS_SQL = text("""
     WITH ranked_roads AS (

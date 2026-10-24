@@ -61,6 +61,9 @@ export interface CameraSummary {
   analyzed_count: number;
   last_scheduler_cycle: string | null;
   circuit_breaker_open: boolean;
+  cycle_target_sec?: number;
+  cycle_checked_count?: number | null;
+  cycle_pending_count?: number | null;
 }
 
 export interface CameraEvidence {
@@ -122,6 +125,8 @@ export interface CameraImageMetadata {
   image_status_reason: string;
   captured_at?: string | null;
   retrieved_at?: string | null;
+  last_attempt_at?: string | null;
+  last_success_at?: string | null;
   analyzed_at?: string | null;
   source_updated_at?: string | null;
   model_status?: string | null;
@@ -133,8 +138,16 @@ export interface CameraImageMetadata {
   enhancement_applied?: boolean;
   model_pipeline?: string | null;
   etag?: string | null;
+  image_hash?: string | null;
   content_length?: number | null;
   mime_type?: string | null;
+}
+
+export interface ActiveCameraResponse {
+  status: string;
+  registered_count: number;
+  active_viewed_count: number;
+  active_route_count: number;
 }
 
 export interface WeatherTideSignal {
@@ -289,15 +302,25 @@ export interface LocationWeatherResponse {
 
 export interface TrafficNewsItem {
   id: string;
+  canonical_url?: string;
   title: string;
   summary: string;
-  source: string;
+  source?: string;
+  source_name?: string;
   category: string;
   severity: string;
-  published_at: string;
+  event_status?: string;
+  published_at?: string | null;
+  fetched_at?: string;
+  event_at?: string | null;
+  expires_at?: string | null;
   lat?: number | null;
   lng?: number | null;
   distance_km?: number | null;
+  location_confidence?: string;
+  geocoding_status?: string;
+  verification_status?: string;
+  image_url?: string | null;
   link?: string | null;
 }
 
@@ -309,5 +332,33 @@ export interface NearbyTrafficNewsResponse {
   items: TrafficNewsItem[];
   status: string;
   message: string;
+  fetched_at: string;
+}
+
+export interface TrafficNewsListResponse {
+  total: number;
+  count: number;
+  items: TrafficNewsItem[];
+  fetched_at: string;
+}
+
+export interface TrafficNewsSummaryResponse {
+  total_articles: number;
+  active_hazards: number;
+  resolved_locations_count: number;
+  categories: Record<string, number>;
+  sources: Record<string, {
+    name: string;
+    status: string;
+    type: string;
+    last_check?: string;
+  }>;
+  latest_update?: string | null;
+  fetched_at: string;
+}
+
+export interface TrafficNewsHighlightsResponse {
+  count: number;
+  items: TrafficNewsItem[];
   fetched_at: string;
 }

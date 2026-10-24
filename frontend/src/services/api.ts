@@ -5,6 +5,7 @@
  */
 
 import {
+  ActiveCameraResponse,
   CameraEvidence,
   CameraImageMetadata,
   CameraSummary,
@@ -18,6 +19,9 @@ import {
   WebSocketAlertMessage,
   LocationWeatherResponse,
   NearbyTrafficNewsResponse,
+  TrafficNewsListResponse,
+  TrafficNewsHighlightsResponse,
+  TrafficNewsSummaryResponse,
 } from "../types/contracts";
 
 const API_BASE_URL =
@@ -74,6 +78,60 @@ export async function fetchCameraMetadata(camId: string): Promise<CameraImageMet
     throw new Error(err?.detail?.message || `Lỗi tải thông tin camera (${res.status})`);
   }
   return await res.json();
+}
+
+/**
+ * Registers one or more cameras as actively viewed (modal open or viewport) for prioritized 60-second refreshes.
+ */
+export async function registerActiveViewedCameras(camIds: string[], ttlSeconds: number = 90): Promise<ActiveCameraResponse | null> {
+  const validIds = camIds.filter(id => id && SAFE_CAM_ID_REGEX.test(id)).slice(0, 50);
+  if (validIds.length === 0) return null;
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/cameras/active-view`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cam_ids: validIds, ttl_seconds: ttlSeconds }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.debug("Failed to register active viewed cameras:", err);
+    return null;
+  }
+}
+
+/**
+ * Unregisters a camera from active priority when the user closes its modal.
+ */
+export async function unregisterActiveViewedCamera(camId: string): Promise<void> {
+  if (!camId || !SAFE_CAM_ID_REGEX.test(camId)) return;
+  try {
+    await fetch(`${API_BASE_URL}/api/v1/cameras/${encodeURIComponent(camId)}/active-view`, {
+      method: "DELETE",
+    });
+  } catch (err) {
+    console.debug("Failed to unregister active viewed camera:", err);
+  }
+}
+
+/**
+ * Registers cameras along an active navigation route corridor for prioritized 60-second refreshes.
+ */
+export async function registerActiveRouteCameras(camIds: string[], ttlSeconds: number = 900): Promise<ActiveCameraResponse | null> {
+  const validIds = camIds.filter(id => id && SAFE_CAM_ID_REGEX.test(id)).slice(0, 100);
+  if (validIds.length === 0) return null;
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/cameras/active-route`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cam_ids: validIds, ttl_seconds: ttlSeconds }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.debug("Failed to register active route cameras:", err);
+    return null;
+  }
 }
 
 /**
@@ -342,5 +400,58 @@ export async function getNearbyTrafficNews(
     { cache: "no-store" }
   );
   if (!response.ok) throw new Error(`Không tải được tin giao thông gần đây (${response.status}).`);
+  return response.json();
+}
+
+export interface FetchTrafficNewsParams {
+  limit?: number;
+  offset?: number;
+  category?: string;
+  timeframe?: string;
+  search?: string;
+  lat?: number;
+  lng?: number;
+  radius_km?: number;
+}
+
+/** Fetches paginated list of traffic news with filters */
+export async function fetchTrafficNews(
+  params: FetchTrafficNewsParams = {}
+): Promise<TrafficNewsListResponse> {
+  const query = new URLSearchParams();
+  if (params.limit !== undefined) query.set("limit", String(params.limit));
+  if (params.offset !== undefined) query.set("offset", String(params.offset));
+  if (params.category) query.set("category", params.category);
+  if (params.timeframe) query.set("timeframe", params.timeframe);
+  if (params.search) query.set("search", params.search);
+  if (params.lat !== undefined) query.set("lat", String(params.lat));
+  if (params.lng !== undefined) query.set("lng", String(params.lng));
+  if (params.radius_km !== undefined) query.set("radius_km", String(params.radius_km));
+
+  const qs = query.toString();
+  const url = `${API_BASE_URL}/api/v1/traffic-news${qs ? `?${qs}` : ""}`;
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Không tải được danh sách tin giao thông (${response.status}).`);
+  return response.json();
+}
+
+/** Fetches high-signal traffic news highlights for hero and spotlight */
+export async function fetchTrafficNewsHighlights(
+  limit = 5
+): Promise<TrafficNewsHighlightsResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v1/traffic-news/highlights?limit=${limit}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) throw new Error(`Không tải được tin nổi bật (${response.status}).`);
+  return response.json();
+}
+
+/** Fetches traffic news summary, category counts, and source statuses */
+export async function fetchTrafficNewsSummary(): Promise<TrafficNewsSummaryResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/traffic-news/summary`, {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Không tải được thống kê bản tin (${response.status}).`);
   return response.json();
 }
