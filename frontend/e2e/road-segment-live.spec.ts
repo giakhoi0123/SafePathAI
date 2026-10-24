@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
 test("a sourced OSRM step can be highlighted without claiming an OSM Way ID", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/map");
   await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
   await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: /^Tìm tuyến đường/ }).click();

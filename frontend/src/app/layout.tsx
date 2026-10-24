@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "../styles/liquid-glass.css";
 import { AuthProvider } from "../context/AuthContext";
 
 export const metadata: Metadata = {

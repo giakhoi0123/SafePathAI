@@ -77,7 +77,7 @@ export default function CameraMonitorPage() {
   });
 
   return (
-    <div className="flex flex-col min-h-screen bg-pearl-100 text-ink-900 relative selection:bg-indigo-600 selection:text-white">
+    <div className="spatial-aux flex flex-col min-h-screen bg-pearl-100 text-ink-900 relative selection:bg-indigo-600 selection:text-white">
       {/* Background aurora mist */}
       <div className="absolute top-[-10%] left-[-5%] w-[45vw] h-[45vw] rounded-full bg-gradient-to-br from-indigo-200/40 via-ice-200/30 to-transparent blur-3xl pointer-events-none" />
       <div className="absolute bottom-[-10%] right-[-5%] w-[40vw] h-[40vw] rounded-full bg-gradient-to-tl from-lavender-200/40 via-soft-cyan/30 to-transparent blur-3xl pointer-events-none" />
@@ -86,7 +86,7 @@ export default function CameraMonitorPage() {
       <header className="h-14 glass-panel border-b border-white/80 px-5 flex items-center justify-between shrink-0 z-30 shadow-glass-sm sticky top-0">
         <div className="flex items-center gap-3">
           <Link
-            href="/"
+            href="/map"
             className="p-2 bg-white/80 hover:bg-white rounded-2xl border border-white/90 text-ink-700 hover:text-ink-950 transition shadow-glass-sm"
             title="Quay lại Bản đồ"
           >
@@ -110,7 +110,7 @@ export default function CameraMonitorPage() {
         {/* Navigation links */}
         <div className="flex items-center gap-2">
           <Link
-            href="/"
+            href="/map"
             className="px-3 py-1.5 rounded-full text-xs font-semibold text-ink-700 hover:text-ink-950 hover:bg-white/70 transition"
           >
             Bản đồ
@@ -148,7 +148,7 @@ export default function CameraMonitorPage() {
               </span>
               <div className="mt-1 flex items-baseline gap-2">
                 <span className="text-xl font-black text-ink-950 font-mono">{summary.total_registered}</span>
-                <span className="text-[10px] font-medium text-emerald-600">100% WGS84 GPS</span>
+                <span className="text-[10px] font-medium text-emerald-600">{summary.valid_gps_count} có tọa độ</span>
               </div>
             </div>
 
@@ -166,12 +166,12 @@ export default function CameraMonitorPage() {
             <div className="glass-panel rounded-2xl p-3 border border-white/90 shadow-glass-sm flex flex-col justify-between">
               <span className="text-[11px] font-semibold text-ink-500 flex items-center gap-1.5">
                 <Eye className="w-3.5 h-3.5 text-cyan-600" />
-                Ảnh Trực Tiếp Khả Dụng
+                Ảnh Nhận Gần Đây
               </span>
               <div className="mt-1 flex items-baseline gap-2">
                 <span className="text-xl font-black text-cyan-700 font-mono">{summary.valid_images_count}</span>
                 <span className="text-[10px] font-medium text-ink-500">
-                  {summary.circuit_breaker_open ? "Circuit Open" : "15m Live Frame"}
+                  {summary.circuit_breaker_open ? "Circuit Open" : "trong 15 phút"}
                 </span>
               </div>
             </div>
@@ -183,7 +183,7 @@ export default function CameraMonitorPage() {
               </span>
               <div className="mt-1 flex items-baseline gap-2">
                 <span className="text-xl font-black text-amber-700 font-mono">{summary.analyzed_count}</span>
-                <span className="text-[10px] font-medium text-ink-500">YOLO + U-Net</span>
+                <span className="text-[10px] font-medium text-ink-500">kết quả từ backend</span>
               </div>
             </div>
           </div>

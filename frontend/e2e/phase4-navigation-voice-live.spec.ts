@@ -24,7 +24,7 @@ test("speech starts only after explicit opt-in and Start; pause, stop and alert 
   await installSpeechSpy(page);
   let socket: WebSocketRoute | null = null;
   await page.routeWebSocket("**/ws/alerts", (ws) => { socket = ws; });
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   await expect(page.locator("[data-navigation-state='idle']")).toBeVisible();
   await expect.poll(async () => Boolean(socket)).toBe(true);
@@ -70,7 +70,7 @@ test("speech starts only after explicit opt-in and Start; pause, stop and alert 
 
 test("voice is muted by default; tracking starts only with consent and stops on pause", async ({ page }) => {
   await installSpeechSpy(page);
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
   await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
@@ -91,7 +91,7 @@ test("voice is muted by default; tracking starts only with consent and stops on 
 
 test("switching the selected live route cancels speech and returns to preview", async ({ page }) => {
   await installSpeechSpy(page);
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
   await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
@@ -112,7 +112,7 @@ test("switching the selected live route cancels speech and returns to preview", 
 
 test("consented position updates announce the next real OSRM turn once", async ({ page }) => {
   await installSpeechSpy(page);
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   const responsePromise = page.waitForResponse((response) => response.url().includes("/api/v1/routes/search") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Chợ Bến Thành" }).click();

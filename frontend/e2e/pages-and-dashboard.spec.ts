@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 
 test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", () => {
   test("Navbar links navigate to Monitor, Dashboard, and Account pages", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/map");
 
     // Check navbar brand and links
     await expect(page.locator("header")).toBeVisible();
@@ -27,7 +27,7 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
     await page.waitForURL("**/dashboard");
     await expect(page.locator("text=Bảng tin & Lộ trình SafePathAI")).toBeVisible();
     await expect(page.locator("text=Địa điểm yêu thích (1-Click tìm đường)")).toBeVisible();
-    await expect(page.locator("text=Báo cáo sự cố cộng đồng")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Lịch sử tìm đường" })).toBeVisible();
 
     // Navigate to Account / Settings page
     const accountLink = page.locator("a[href='/account']").first();
@@ -40,10 +40,10 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
     await expect(page.locator("text=Phương tiện di chuyển chính")).toBeVisible();
 
     // Return to Map
-    const mapLink = page.locator("a[href='/']").first();
+    const mapLink = page.locator("a[href='/map']").first();
     await expect(mapLink).toBeVisible();
     await mapLink.click();
-    await page.waitForURL("**/");
+    await page.waitForURL("**/map");
     await expect(page.locator("[data-testid='route-map']")).toBeVisible();
   });
 
@@ -76,24 +76,11 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
     await expect(page.locator("[data-testid='camera-evidence-modal']")).not.toBeVisible();
   });
 
-  test("Dashboard displays saved places and allows submitting incident reports", async ({ page }) => {
+  test("Guest profile does not invent saved places or report submission", async ({ page }) => {
     await page.goto("/dashboard");
-
-    // Check saved places section
-    await expect(page.locator("text=Địa điểm yêu thích (1-Click tìm đường)")).toBeVisible();
-
-    // Incident report form inputs
-    const roadInput = page.locator("input[placeholder*='Ví dụ: Đường Nguyễn Hữu Cảnh']");
-    await expect(roadInput).toBeVisible();
-    await roadInput.fill("Đường Nguyễn Hữu Cảnh ngập 20cm");
-
-    // Submit report button
-    const submitBtn = page.locator("button:has-text('Gửi báo cáo sự cố')");
-    await expect(submitBtn).toBeVisible();
-    await submitBtn.click();
-
-    // Success feedback message
-    await expect(page.locator("text=Cảm ơn bạn đã đóng góp!")).toBeVisible();
+    await expect(page.getByText("Chưa có địa điểm đã lưu.")).toBeVisible();
+    await expect(page.getByText("Chưa có lịch sử tìm đường.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Gửi báo cáo sự cố" })).toHaveCount(0);
   });
 
   test("Account page allows vehicle switching and shows OAuth configuration state", async ({ page }) => {

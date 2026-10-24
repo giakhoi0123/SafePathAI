@@ -1,6 +1,6 @@
 """
 SafePathAI Core FastAPI Application and Real-Time WebSocket Server.
-Exposes RESTful endpoints for routing, camera evidence, simulation triggers,
+Exposes RESTful endpoints for routing, camera evidence, environmental observations,
 and WebSocket streams for real-time traffic and flood alerts.
 """
 
@@ -594,6 +594,8 @@ async def list_cameras(
             try:
                 if cached_raw:
                     redis_data = json.loads(cached_raw)
+                    if redis_data.get("source_status") not in ("LIVE", "STALE"):
+                        redis_data = None
             except Exception:
                 pass
 
@@ -647,9 +649,16 @@ async def list_cameras(
                     traffic_density_score=None,
                     flood_ratio=None,
                     risk_level=RiskLevel.UNKNOWN,
-                    source_status=DataSourceStatus.LIVE if is_fresh else DataSourceStatus.STALE,
+                    captured_at=None,
+                    retrieved_at=datetime.fromtimestamp(os.path.getmtime(local_image_path), timezone.utc) if has_local_file else None,
+                    source_status=DataSourceStatus.STALE,
                     updated_at=now,
                 )
+            if (evidence.captured_at is None or evidence.captured_at.tzinfo is None
+                    or not 0 <= (now - evidence.captured_at).total_seconds() <= settings.CAMERA_IMAGE_TTL_SECONDS):
+                evidence.source_status = DataSourceStatus.STALE
+                evidence.evidence_eligibility = EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
+                evidence.risk_level = RiskLevel.UNKNOWN
             evidence_list.append(evidence)
     finally:
         if redis is not None:
@@ -666,13 +675,14 @@ async def list_cameras(
 async def get_camera_image(
     cam_id: str,
     request: Request,
-    type: str = Query("original", pattern="^(original|enhanced)$", description="Type of image: 'original' (source evidence) or 'enhanced' (AI assistive enhancement)"),
+    type: str = Query("original", pattern="^(original|enhanced|analyzed)$", description="Type of image: 'original' (source evidence), 'enhanced' (AI assistive enhancement), or 'analyzed' (detection overlay)"),
     session: AsyncSession = Depends(get_db),
 ):
     """
     Returns verified image snapshot for the given camera ID.
     - type='original': Unaltered raw camera frame (canonical source evidence).
     - type='enhanced': AI assistive pre-processed frame (gamma/CLAHE/denoise/unsharp).
+    - type='analyzed': AI detection overlay with bounding boxes and segmentations.
     Zero-Mock: Returns HTTP 404/503 if no valid verified image exists.
     Never returns sample or simulated mock images.
     Enforces path traversal protection and returns ETag / Cache-Control headers.
@@ -696,6 +706,45 @@ async def get_camera_image(
 
     local_path = os.path.join("storage", "cams", f"{cam_id}.jpg")
     enhanced_path = os.path.join("storage", "cams", f"{cam_id}_enhanced.jpg")
+    analyzed_path = os.path.join("storage", "cams", f"{cam_id}_analyzed.jpg")
+
+    # If analyzed detection overlay is requested
+    if type == "analyzed":
+        if not os.path.exists(analyzed_path):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "code": "ANALYZED_IMAGE_UNAVAILABLE",
+                    "message": f"Analyzed detection overlay not available for camera '{cam_id}'.",
+                },
+            )
+        try:
+            with open(analyzed_path, "rb") as f:
+                content = f.read()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"code": "IMAGE_READ_ERROR", "message": str(exc)},
+            )
+        analyzed_hash = hashlib.md5(content).hexdigest()
+        etag = f'"{analyzed_hash}"'
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match and if_none_match.strip() == etag:
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED)
+
+        now = datetime.now(timezone.utc)
+        file_age = now.timestamp() - os.path.getmtime(analyzed_path)
+        is_fresh = file_age <= settings.CAMERA_IMAGE_TTL_SECONDS
+        headers = {
+            "ETag": etag,
+            "Cache-Control": "public, max-age=60" if is_fresh else "no-cache",
+            "X-Image-Kind": "analyzed",
+            "X-Analysis-Notice": "Computer Vision detection overlay (YOLO & Water segmentation)",
+            "X-Image-Access-Status": ImageAccessStatus.VIEWABLE_PUBLIC.value,
+            "X-Evidence-Eligibility": EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING.value,
+            "X-Retrieved-At": now.isoformat(),
+        }
+        return FileResponse(analyzed_path, media_type="image/jpeg", headers=headers)
 
     # If enhanced image is requested
     if type == "enhanced":
@@ -879,7 +928,7 @@ async def get_camera_metadata(
                 content_length = len(content)
                 mime_type = "image/jpeg" if val.format == "JPEG" else f"image/{val.format.lower() if val.format else 'jpeg'}"
                 captured_at = val.captured_at
-                retrieved_at = val.retrieved_at
+                retrieved_at = datetime.fromtimestamp(os.path.getmtime(local_path), timezone.utc)
                 image_status_reason = "VALID_IMAGE_CACHED"
                 access_status = ImageAccessStatus.VIEWABLE_PUBLIC
             else:
@@ -892,6 +941,31 @@ async def get_camera_metadata(
     if not has_local and not portal_circuit_breaker.can_request():
         access_status = ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED
         image_status_reason = "EXTERNAL_ACCESS_RESTRICTED"
+
+    # Query persistent ingestion state for truthful error reason and last attempt
+    ing_stmt = text("""
+        SELECT last_attempt_at, last_success_at, last_captured_at, last_retrieved_at, last_error_code, failure_reason, validation_status
+        FROM camera_ingestion_state
+        WHERE cam_id = :cam_id
+    """)
+    ing_res = await session.execute(ing_stmt, {"cam_id": cam_id})
+    ing_row = ing_res.fetchone()
+
+    if ing_row and has_local:
+        captured_at = ing_row.last_captured_at
+        retrieved_at = ing_row.last_retrieved_at or retrieved_at
+
+    if not has_local and ing_row:
+        if ing_row.last_error_code == "PLACEHOLDER_FRAME" or ing_row.validation_status == "PLACEHOLDER_ERROR_FRAME":
+            image_status_reason = "PLACEHOLDER_FRAME"
+            access_status = ImageAccessStatus.UNAVAILABLE
+        elif ing_row.last_error_code == "EXTERNAL_ACCESS_RESTRICTED":
+            image_status_reason = "EXTERNAL_ACCESS_RESTRICTED"
+            access_status = ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED
+        elif ing_row.last_error_code:
+            image_status_reason = ing_row.last_error_code
+            access_status = ImageAccessStatus.UNAVAILABLE
+
 
     source_url = row.source_uri or (
         f"{settings.HCMC_CAMERA_BASE_URL}?id={cam_id}&bg=black&w=300&h=230"
@@ -1044,6 +1118,24 @@ async def get_auth_status():
     """
     google_id = os.getenv("AUTH_GOOGLE_ID") or os.getenv("GOOGLE_CLIENT_ID") or ""
     google_secret = os.getenv("AUTH_GOOGLE_SECRET") or os.getenv("GOOGLE_CLIENT_SECRET") or ""
+
+    if not (google_id.strip() and google_secret.strip()):
+        try:
+            from dotenv import dotenv_values
+            env_paths = [
+                os.path.join(os.getcwd(), "frontend", ".env.local"),
+                os.path.join(os.getcwd(), ".env"),
+            ]
+            for ep in env_paths:
+                if os.path.exists(ep):
+                    vals = dotenv_values(ep)
+                    google_id = google_id or vals.get("AUTH_GOOGLE_ID") or vals.get("GOOGLE_CLIENT_ID") or ""
+                    google_secret = google_secret or vals.get("AUTH_GOOGLE_SECRET") or vals.get("GOOGLE_CLIENT_SECRET") or ""
+                    if google_id.strip() and google_secret.strip():
+                        break
+        except Exception:
+            pass
+
     is_configured = bool(google_id.strip() and google_secret.strip())
     missing = []
     if not google_id.strip():

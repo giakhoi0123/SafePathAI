@@ -7,6 +7,8 @@ module.exports = {
   ],
   theme: {
     extend: {
+      borderRadius: { liquid: "28px" },
+      backdropSaturate: { liquid: "210%" },
       colors: {
         background: "var(--background)",
         foreground: "var(--foreground)",

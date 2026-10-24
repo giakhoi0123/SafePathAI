@@ -8,6 +8,7 @@ import {
   CameraEvidence,
   CameraImageMetadata,
   CameraSummary,
+  ModelStatusResponse,
   Coordinates,
   PlaceResult,
   PlaceSearchResponse,
@@ -43,6 +44,16 @@ export function getCameraEnhancedImageUrl(camId: string): string {
     return "";
   }
   return `${API_BASE_URL}/api/v1/cameras/${encodeURIComponent(camId)}/image?type=enhanced`;
+}
+
+/**
+ * Returns full URL to fetch a camera's AI detection overlay frame (with YOLO boxes and water segmentations).
+ */
+export function getCameraAnalyzedImageUrl(camId: string): string {
+  if (!camId || !SAFE_CAM_ID_REGEX.test(camId)) {
+    return "";
+  }
+  return `${API_BASE_URL}/api/v1/cameras/${encodeURIComponent(camId)}/image?type=analyzed`;
 }
 
 /**
@@ -300,4 +311,11 @@ export function connectAlertsWebSocket(
       ws = null;
     }
   };
+}
+
+/** Deployment status comes from the loaded model manifest, never a marketing label. */
+export async function fetchModelStatus(): Promise<ModelStatusResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/models/status`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`Không tải được trạng thái mô hình (${response.status}).`);
+  return response.json();
 }

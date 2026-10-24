@@ -166,6 +166,8 @@ async def ingest_verified_tide_bulletin(
         rain_status="WEATHER_UNAVAILABLE",
         tide_level_meters=round(level_meters, 2),
         tide_status="LIVE",
+        tide_observed_at=observed_at,
+        tide_source_url=source_url,
         tide_station=station,
         tide_datum=datum,
         is_high_tide_alert=is_alert,
@@ -220,7 +222,16 @@ async def fetch_tide_signal(
             cached_raw = await redis_client.get(REDIS_TIDE_BULLETIN_KEY)
             if cached_raw:
                 data = json.loads(cached_raw)
-                return WeatherTideSignal.model_validate(data)
+                signal = WeatherTideSignal.model_validate(data)
+                # This key contains a tide-only bulletin; preserve its own provenance.
+                signal.tide_observed_at = signal.tide_observed_at or signal.timestamp
+                signal.tide_source_url = signal.tide_source_url or signal.source_url
+                observed = signal.tide_observed_at
+                if (signal.tide_status != "LIVE" or not signal.tide_source_url or observed is None
+                        or observed.tzinfo is None or not 0 <= (now - observed).total_seconds() <= TIDE_BULLETIN_TTL_SECONDS):
+                    signal.tide_status = "STALE"
+                    signal.is_high_tide_alert = None
+                return signal
         except Exception as exc:
             logger.debug("Failed to read tide bulletin from Redis: %s", exc)
         finally:
@@ -265,6 +276,8 @@ async def get_combined_weather_tide(
         weather_code=weather_code,
         tide_level_meters=tide_signal.tide_level_meters,
         tide_status=tide_signal.tide_status,
+        tide_observed_at=tide_signal.tide_observed_at,
+        tide_source_url=tide_signal.tide_source_url,
         tide_station=tide_signal.tide_station,
         tide_datum=tide_signal.tide_datum,
         is_high_tide_alert=tide_signal.is_high_tide_alert,

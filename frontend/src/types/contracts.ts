@@ -144,10 +144,12 @@ export interface WeatherTideSignal {
   weather_code?: number | null;
   tide_level_meters: number | null;
   tide_status: string;
+  tide_observed_at?: string | null;
+  tide_source_url?: string | null;
   tide_station?: string | null;
   tide_datum?: string | null;
   is_high_tide_alert: boolean | null;
-  timestamp: string;
+  timestamp: string | null;
   source_url?: string | null;
 }
 
@@ -254,3 +256,17 @@ export type NavigationUXState =
   | "NAVIGATING";
 
 export type MapSelectionMode = "ORIGIN" | "DESTINATION" | "NONE";
+
+export interface ModelStatusResponse {
+  vehicle_detector: ModelDeploymentStatus;
+  flood_segmenter: ModelDeploymentStatus;
+}
+export interface ModelDeploymentStatus {
+  status: string;
+  model_name: string | null;
+  version: string | null;
+  sha256: string | null;
+  source_url: string | null;
+  provenance_status?: string | null;
+  deployment_validation?: string | null;
+}

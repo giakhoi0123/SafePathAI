@@ -12,6 +12,7 @@ from sqlalchemy import (
     String,
     Float,
     DateTime,
+    Text,
     text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -128,6 +129,8 @@ class TrafficCamera(Base):
     coordinate_verified_at: Mapped[Optional[Any]] = mapped_column(DateTime(timezone=True), nullable=True)
     source_uri: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     location_confidence: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    provider_snapshot_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    generated_source_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     orientation: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     permitted_use: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, default="PERMISSION_UNVERIFIED")
     snapshot_cam_status: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
@@ -180,6 +183,9 @@ class CameraIngestionState(Base):
     image_height: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     model_status: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     last_error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_checked_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    cached_image_path: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     def __repr__(self) -> str:
         return f"<CameraIngestionState({self.cam_id}, status={self.source_status}, retries={self.failure_count})>"

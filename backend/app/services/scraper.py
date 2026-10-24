@@ -398,16 +398,21 @@ async def scrape_camera_image(
                     f.write(response.content)
 
                 etag_val = val_result.md5_hash
-                eligibility = (
-                    EvidenceEligibility.ROUTING_ELIGIBLE
-                    if (settings.CAMERA_ROUTING_EVIDENCE_PERMITTED and val_result.captured_at is not None)
-                    else EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
-                )
-                source_st = (
-                    DataSourceStatus.LIVE
-                    if (val_result.captured_at is None or (now - val_result.captured_at).total_seconds() <= settings.CAMERA_IMAGE_TTL_SECONDS)
-                    else DataSourceStatus.STALE
-                )
+
+                if val_result.captured_at is not None:
+                    is_fresh = (now - val_result.captured_at).total_seconds() <= settings.CAMERA_IMAGE_TTL_SECONDS
+                    source_st = DataSourceStatus.LIVE if is_fresh else DataSourceStatus.STALE
+                    capture_time_status = "CAPTURED_RECENTLY" if is_fresh else "STALE"
+                    eligibility = (
+                        EvidenceEligibility.ROUTING_ELIGIBLE
+                        if (settings.CAMERA_ROUTING_EVIDENCE_PERMITTED and is_fresh)
+                        else EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
+                    )
+                else:
+                    # Strict Zero-Mock: Timestamp not verified in frame; only known to be freshly retrieved
+                    source_st = DataSourceStatus.LIVE
+                    capture_time_status = "CAPTURE_TIME_UNKNOWN"
+                    eligibility = EvidenceEligibility.NOT_VERIFIED_FOR_ROUTING
 
                 return ScrapedCameraResult(
                     cam_id=cam_id,
@@ -421,7 +426,7 @@ async def scrape_camera_image(
                     source_status=source_st,
                     retrieved_at=now,
                     captured_at=val_result.captured_at,
-                    capture_time_status=val_result.capture_time_status,
+                    capture_time_status=capture_time_status,
                     file_size=len(response.content),
                     is_valid_image=True,
                     validation_status=val_result.status.value,

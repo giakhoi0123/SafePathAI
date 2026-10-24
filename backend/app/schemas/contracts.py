@@ -224,6 +224,8 @@ class WeatherTideSignal(BaseModel):
     weather_code: Optional[int] = Field(default=None, description="WMO weather code (e.g. 51-65 rain)")
     tide_level_meters: Optional[float] = Field(default=None, description="Tidal water level in meters relative to datum; None if unobserved")
     tide_status: str = Field(default="TIDE_UNAVAILABLE", description="LIVE, STALE, or TIDE_UNAVAILABLE")
+    tide_observed_at: Optional[datetime] = Field(default=None, description="Independent tidal observation timestamp")
+    tide_source_url: Optional[str] = Field(default=None, description="Original source of the tidal bulletin")
     tide_station: Optional[str] = Field(default=None, description="Observing tidal station name (e.g. Phú An, Nhà Bè)")
     tide_datum: Optional[str] = Field(default=None, description="Vertical datum (e.g. Hòn Dấu VN-2000)")
     is_high_tide_alert: Optional[bool] = Field(default=None, description="True if tide exceeds warning threshold; None if unobserved")

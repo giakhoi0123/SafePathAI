@@ -19,7 +19,7 @@ test("OSRM route appears on the live map", async ({ page }) => {
   page.on("console", (msg) => console.log(`[BROWSER CONSOLE] ${msg.type()}: ${msg.text()}`));
   page.on("pageerror", (err) => console.error(`[BROWSER ERROR]`, err));
 
-  await page.goto("/");
+  await page.goto("/map");
   await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
   await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
   await page.getByRole("button", { name: "Tìm tuyến đường" }).click();
@@ -48,7 +48,7 @@ test("OSRM route appears on the live map", async ({ page }) => {
 
 test("five independent HCMC pairs render real routes on tiles", async ({ page }) => {
   test.setTimeout(90000);
-  await page.goto("/");
+  await page.goto("/map");
   const pairs = [
     ["Chợ Bến Thành", "Ngã tư Hàng Xanh"],
     ["Sân bay Tân Sơn Nhất", "Chợ Bến Thành"],

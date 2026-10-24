@@ -143,7 +143,7 @@ function InnerAuthProvider({ children }: { children: React.ReactNode }) {
             destName: rh.dest_name,
             distanceKm: rh.distance_km,
             durationMins: rh.duration_mins,
-            timestamp: rh.created_at || new Date().toISOString(),
+            timestamp: rh.created_at || "",
           })),
         });
       }
@@ -199,7 +199,7 @@ function InnerAuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const savePlace = async (place: { name: string; address?: string; lat: number; lng: number; label?: string }) => {
-    if (!user) return;
+    if (!user) throw new Error("Vui lòng đăng nhập để lưu địa điểm.");
     try {
       const res = await fetch("/api/v1/user/saved-places", {
         method: "POST",
@@ -215,6 +215,7 @@ function InnerAuthProvider({ children }: { children: React.ReactNode }) {
           category: place.label || "favorite",
         }),
       });
+      if (!res.ok) throw new Error(`Không thể cập nhật địa điểm (${res.status}).`);
       if (res.ok) {
         const saved = await res.json();
         setUser((prev) =>
@@ -237,17 +238,18 @@ function InnerAuthProvider({ children }: { children: React.ReactNode }) {
         );
       }
     } catch (err) {
-      console.error("Failed to save place:", err);
+      throw err;
     }
   };
 
   const removeSavedPlace = async (id: string) => {
-    if (!user) return;
+    if (!user) throw new Error("Vui lòng đăng nhập để lưu địa điểm.");
     try {
       const res = await fetch(`/api/v1/user/saved-places/${id}`, {
         method: "DELETE",
         headers: { "X-User-Id": user.id },
       });
+      if (!res.ok) throw new Error(`Không thể cập nhật địa điểm (${res.status}).`);
       if (res.ok) {
         setUser((prev) =>
           prev
@@ -259,7 +261,7 @@ function InnerAuthProvider({ children }: { children: React.ReactNode }) {
         );
       }
     } catch (err) {
-      console.error("Failed to delete saved place:", err);
+      throw err;
     }
   };
 
@@ -306,7 +308,7 @@ function InnerAuthProvider({ children }: { children: React.ReactNode }) {
                     destName: created.dest_name,
                     distanceKm: created.distance_km,
                     durationMins: created.duration_mins,
-                    timestamp: created.created_at || new Date().toISOString(),
+                    timestamp: created.created_at || "",
                   },
                   ...prev.history.slice(0, 19),
                 ],

@@ -1,13 +1,19 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { MapboxOverlay } from "@deck.gl/mapbox";
+import { ScatterplotLayer } from "@deck.gl/layers";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { CameraEvidence, Coordinates, MapSelectionMode, RouteSegmentRisk, SafeRouteResponse } from "../types/contracts";
 import { Camera, MapPin } from "lucide-react";
+import { hasVerifiedFloodObservation } from "../lib/observations";
 import GlassToggle, { CameraFilterMode } from "./Glass/GlassToggle";
 
 interface MapContainerProps {
+  spatialDark?: boolean;
+  pitch?: number;
+  showFloodObservations?: boolean;
   cameras: CameraEvidence[];
   recommendedRoute: SafeRouteResponse | null;
   alternativeRoutes: SafeRouteResponse[];
@@ -50,6 +56,9 @@ const setSource = (map: maplibregl.Map, id: string, data: GeoJSON.FeatureCollect
   (map.getSource(id) as maplibregl.GeoJSONSource | undefined)?.setData(data);
 
 export const MapContainer: React.FC<MapContainerProps> = ({
+  spatialDark = false,
+  pitch = 0,
+  showFloodObservations = false,
   cameras,
   recommendedRoute,
   alternativeRoutes,
@@ -83,6 +92,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     cameraFilter,
   });
   const markerRef = useRef<maplibregl.Marker[]>([]);
+  const tooltipPopupRef = useRef<maplibregl.Popup | null>(null);
   const lastLocationFocusRef = useRef(0);
   const lastFitRouteRef = useRef<string | null>(null);
   const cameraPreferenceSetRef = useRef(false);
@@ -166,14 +176,31 @@ export const MapContainer: React.FC<MapContainerProps> = ({
 
     const features: GeoJSON.Feature[] = filtered.map((cam) => {
       const onRoute = routeCoords ? cameraNearRoute(cam.lng, cam.lat, routeCoords) : false;
+      let iconName = "camera-icon-gray";
+      if (onRoute) {
+        iconName = "camera-icon-route";
+      } else if (cam.has_image && cam.source_status === "LIVE") {
+        iconName = "camera-icon-cyan";
+      } else if (cam.has_image || cam.source_status === "STALE") {
+        iconName = "camera-icon-amber";
+      } else if (cam.image_access_status === "EXTERNAL_ACCESS_RESTRICTED" || (cam as any).source_status === "OFFLINE") {
+        iconName = "camera-icon-red";
+      } else {
+        iconName = "camera-icon-gray";
+      }
+
       return {
         type: "Feature",
         geometry: { type: "Point", coordinates: [cam.lng, cam.lat] },
         properties: {
           id: cam.cam_id,
           label: cam.code || cam.name || "Camera",
+          name: cam.name,
+          district: cam.district || "TP.HCM",
+          iconName,
           onRoute: onRoute ? 1 : 0,
           hasImage: cam.has_image ? 1 : 0,
+          sourceStatus: cam.source_status,
         },
       };
     });
@@ -216,7 +243,8 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     if (!containerRef.current || mapRef.current) return;
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: "https://tiles.openfreemap.org/styles/liberty",
+      style: spatialDark ? "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" : "https://tiles.openfreemap.org/styles/liberty",
+      pitch,
       center: [106.7009, 10.7769],
       zoom: 13,
       attributionControl: false,
@@ -226,8 +254,138 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     map.addControl(new maplibregl.AttributionControl({ compact: false }), "bottom-right");
 
+    const registerCameraIcons = (mapInstance: maplibregl.Map) => {
+      const themes: Array<[string, string, string, string, string]> = [
+        ["camera-icon-cyan", "#06B6D4", "#06B6D4", "rgba(255,255,255,0.98)", "rgba(207,250,254,0.95)"],
+        ["camera-icon-gray", "#94A3B8", "#64748B", "rgba(255,255,255,0.98)", "rgba(241,245,249,0.95)"],
+        ["camera-icon-amber", "#F59E0B", "#F59E0B", "rgba(255,255,255,0.98)", "rgba(254,243,199,0.95)"],
+        ["camera-icon-red", "#EF4444", "#EF4444", "rgba(255,255,255,0.98)", "rgba(254,226,226,0.95)"],
+        ["camera-icon-route", "#F59E0B", "#D97706", "rgba(255,251,235,0.98)", "rgba(253,230,138,0.95)"],
+      ];
+
+      for (const [id, borderColor, ledColor, bg1, bg2] of themes) {
+        if (!mapInstance.hasImage(id)) {
+          const canvas = document.createElement("canvas");
+          canvas.width = 64;
+          canvas.height = 64;
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.shadowColor = "rgba(0, 0, 0, 0.18)";
+            ctx.shadowBlur = 8;
+            ctx.shadowOffsetY = 3;
+
+            ctx.beginPath();
+            ctx.arc(32, 32, 24, 0, Math.PI * 2);
+            const grad = ctx.createLinearGradient(12, 12, 52, 52);
+            grad.addColorStop(0, bg1);
+            grad.addColorStop(1, bg2);
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            ctx.shadowColor = "transparent";
+            ctx.lineWidth = 2.5;
+            ctx.strokeStyle = borderColor;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(32, 32, 22, 0, Math.PI * 2);
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+            ctx.stroke();
+
+            ctx.fillStyle = "#1E293B";
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(20, 24, 24, 16, [4]);
+            else ctx.rect(20, 24, 24, 16);
+            ctx.fill();
+
+            ctx.beginPath();
+            if (ctx.roundRect) ctx.roundRect(25, 21, 8, 4, [2]);
+            else ctx.rect(25, 21, 8, 4);
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(32, 32, 5.5, 0, Math.PI * 2);
+            ctx.fillStyle = borderColor;
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(32, 32, 3.2, 0, Math.PI * 2);
+            ctx.fillStyle = "#0F172A";
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(31, 30.8, 1.2, 0, Math.PI * 2);
+            ctx.fillStyle = "#FFFFFF";
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.arc(39.5, 27.5, 1.8, 0, Math.PI * 2);
+            ctx.fillStyle = ledColor;
+            ctx.fill();
+
+            mapInstance.addImage(id, ctx.getImageData(0, 0, 64, 64), { pixelRatio: 2 });
+          }
+        }
+      }
+
+      if (!mapInstance.hasImage("camera-cluster-icon")) {
+        const cCanvas = document.createElement("canvas");
+        cCanvas.width = 76;
+        cCanvas.height = 76;
+        const cCtx = cCanvas.getContext("2d");
+        if (cCtx) {
+          cCtx.shadowColor = "rgba(15, 23, 42, 0.28)";
+          cCtx.shadowBlur = 10;
+          cCtx.shadowOffsetY = 4;
+
+          cCtx.beginPath();
+          cCtx.arc(38, 38, 30, 0, Math.PI * 2);
+          const grad = cCtx.createLinearGradient(12, 12, 64, 64);
+          grad.addColorStop(0, "#4F46E5");
+          grad.addColorStop(0.5, "#2563EB");
+          grad.addColorStop(1, "#06B6D4");
+          cCtx.fillStyle = grad;
+          cCtx.fill();
+
+          cCtx.shadowColor = "transparent";
+          cCtx.lineWidth = 2.5;
+          cCtx.strokeStyle = "#FFFFFF";
+          cCtx.stroke();
+
+          cCtx.beginPath();
+          cCtx.arc(38, 38, 27.5, 0, Math.PI * 2);
+          cCtx.lineWidth = 1;
+          cCtx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+          cCtx.stroke();
+
+          cCtx.beginPath();
+          cCtx.arc(54, 20, 9, 0, Math.PI * 2);
+          cCtx.fillStyle = "#1E1B4B";
+          cCtx.fill();
+          cCtx.lineWidth = 1.5;
+          cCtx.strokeStyle = "#FFFFFF";
+          cCtx.stroke();
+
+          cCtx.fillStyle = "#FFFFFF";
+          cCtx.beginPath();
+          if (cCtx.roundRect) cCtx.roundRect(49, 17, 10, 6, [1.5]);
+          else cCtx.rect(49, 17, 10, 6);
+          cCtx.fill();
+          cCtx.beginPath();
+          cCtx.arc(54, 20, 1.5, 0, Math.PI * 2);
+          cCtx.fillStyle = "#06B6D4";
+          cCtx.fill();
+
+          mapInstance.addImage("camera-cluster-icon", cCtx.getImageData(0, 0, 76, 76), { pixelRatio: 2 });
+        }
+      }
+    };
+
     const onStyleLoad = () => {
       setMapError(false);
+      registerCameraIcons(map);
+
       // Camera Layers - Refined luminous pearl / aurora style
       map.addSource("camera-source", {
         type: "geojson",
@@ -238,47 +396,34 @@ export const MapContainer: React.FC<MapContainerProps> = ({
       });
       map.addLayer({
         id: "camera-clusters",
-        type: "circle",
-        source: "camera-source",
-        filter: ["has", "point_count"],
-        paint: {
-          "circle-color": "#5E77F8",
-          "circle-stroke-color": "#FFFFFF",
-          "circle-stroke-width": 2,
-          "circle-radius": 16,
-          "circle-opacity": 0.92,
-        },
-      });
-      map.addLayer({
-        id: "camera-count",
         type: "symbol",
         source: "camera-source",
         filter: ["has", "point_count"],
         layout: {
+          "icon-image": "camera-cluster-icon",
+          "icon-size": 0.5,
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
           "text-field": ["get", "point_count_abbreviated"],
           "text-font": ["Noto Sans Bold"],
           "text-size": 11,
+          "text-allow-overlap": true,
+          "text-ignore-placement": true,
         },
-        paint: { "text-color": "#FFFFFF" },
+        paint: {
+          "text-color": "#FFFFFF",
+        },
       });
       map.addLayer({
         id: "camera-points",
-        type: "circle",
+        type: "symbol",
         source: "camera-source",
         filter: ["!", ["has", "point_count"]],
-        paint: {
-          "circle-color": [
-            "case",
-            ["==", ["coalesce", ["get", "onRoute"], 0], 1],
-            "#F59E0B",
-            ["==", ["coalesce", ["get", "hasImage"], 0], 1],
-            "#06B6D4",
-            "#7C94FF",
-          ],
-          "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 3.5, 14, 6],
-          "circle-stroke-color": "#FFFFFF",
-          "circle-stroke-width": 1.5,
-          "circle-opacity": 0.95,
+        layout: {
+          "icon-image": ["coalesce", ["get", "iconName"], "camera-icon-gray"],
+          "icon-size": 0.5,
+          "icon-allow-overlap": true,
+          "icon-ignore-placement": true,
         },
       });
       map.addLayer({
@@ -291,7 +436,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
           "text-field": ["get", "label"],
           "text-font": ["Noto Sans Regular"],
           "text-size": 10,
-          "text-offset": [0, 1.4],
+          "text-offset": [0, 1.8],
           "text-optional": true,
         },
         paint: { "text-color": "#15233D", "text-halo-color": "#FFFFFF", "text-halo-width": 2 },
@@ -349,8 +494,8 @@ export const MapContainer: React.FC<MapContainerProps> = ({
       }
       if (dataRef.current.showCameras) {
         const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
-          [e.point.x - 10, e.point.y - 10],
-          [e.point.x + 10, e.point.y + 10],
+          [e.point.x - 18, e.point.y - 18],
+          [e.point.x + 18, e.point.y + 18],
         ];
         if (map.getLayer("camera-points")) {
           const pointFeatures = map.queryRenderedFeatures(bbox, { layers: ["camera-points"] });
@@ -379,6 +524,62 @@ export const MapContainer: React.FC<MapContainerProps> = ({
           }
         }
       }
+    };
+
+    const onMapMouseMove = (e: maplibregl.MapMouseEvent) => {
+      if (!dataRef.current.showCameras || !map.getLayer("camera-points")) {
+        resetCursor();
+        if (tooltipPopupRef.current) tooltipPopupRef.current.remove();
+        return;
+      }
+      const bbox: [maplibregl.PointLike, maplibregl.PointLike] = [
+        [e.point.x - 16, e.point.y - 16],
+        [e.point.x + 16, e.point.y + 16],
+      ];
+      const pointFeatures = map.queryRenderedFeatures(bbox, { layers: ["camera-points"] });
+      const clusterFeatures = map.queryRenderedFeatures(bbox, { layers: ["camera-clusters"] });
+
+      if (pointFeatures.length > 0) {
+        setCursorPointer();
+        const feat = pointFeatures[0];
+        const coords = (feat.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
+        const props = feat.properties || {};
+
+        if (!tooltipPopupRef.current) {
+          tooltipPopupRef.current = new maplibregl.Popup({
+            closeButton: false,
+            closeOnClick: false,
+            offset: [0, -20],
+            className: "camera-map-tooltip",
+          });
+        }
+
+        const hasImg = props.hasImage === 1;
+        const onRoute = props.onRoute === 1;
+        const statusText = onRoute
+          ? "⭐ Camera trên tuyến tìm kiếm"
+          : hasImg
+          ? "🟢 Có ảnh trực tiếp"
+          : "⚪ Chưa có ảnh";
+        const html = `
+          <div style="font-family: system-ui, -apple-system, sans-serif; padding: 4px 6px; font-size: 11px; line-height: 1.35; color: #1E1B4B; min-width: 140px;">
+            <div style="font-weight: 700; color: #1E1B4B;">${props.label || "Camera"}</div>
+            <div style="color: #64748B; font-size: 10px; margin-top: 1px;">${props.name || props.district || "TP.HCM"}</div>
+            <div style="color: ${onRoute ? "#D97706" : hasImg ? "#059669" : "#64748B"}; font-size: 10px; font-weight: 600; margin-top: 3px;">${statusText}</div>
+          </div>
+        `;
+        tooltipPopupRef.current.setLngLat(coords).setHTML(html).addTo(map);
+        return;
+      }
+
+      if (clusterFeatures.length > 0) {
+        setCursorPointer();
+        if (tooltipPopupRef.current) tooltipPopupRef.current.remove();
+        return;
+      }
+
+      resetCursor();
+      if (tooltipPopupRef.current) tooltipPopupRef.current.remove();
     };
 
     const onCameraClick = (e: maplibregl.MapLayerMouseEvent) => {
@@ -429,6 +630,46 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     const setCursorPointer = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = "pointer"; };
     const resetCursor = () => { if (mapRef.current) mapRef.current.getCanvas().style.cursor = ""; };
 
+    const onCameraMouseEnter = (e: maplibregl.MapLayerMouseEvent) => {
+      setCursorPointer();
+      const feature = e.features?.[0];
+      if (!feature || !mapRef.current) return;
+      const coords = (feature.geometry as GeoJSON.Point).coordinates.slice() as [number, number];
+      const props = feature.properties || {};
+
+      if (!tooltipPopupRef.current) {
+        tooltipPopupRef.current = new maplibregl.Popup({
+          closeButton: false,
+          closeOnClick: false,
+          offset: [0, -18],
+          className: "camera-map-tooltip",
+        });
+      }
+
+      const hasImg = props.hasImage === 1;
+      const onRoute = props.onRoute === 1;
+      const statusText = onRoute
+        ? "⭐ Camera trên tuyến tìm kiếm"
+        : hasImg
+        ? "🟢 Có ảnh trực tiếp"
+        : "⚪ Chưa có ảnh";
+      const html = `
+        <div style="font-family: system-ui, -apple-system, sans-serif; padding: 4px 6px; font-size: 11px; line-height: 1.35; color: #1E1B4B; min-width: 140px;">
+          <div style="font-weight: 700; color: #1E1B4B;">${props.label || "Camera"}</div>
+          <div style="color: #64748B; font-size: 10px; margin-top: 1px;">${props.name || props.district || "TP.HCM"}</div>
+          <div style="color: ${onRoute ? "#D97706" : hasImg ? "#059669" : "#64748B"}; font-size: 10px; font-weight: 600; margin-top: 3px;">${statusText}</div>
+        </div>
+      `;
+      tooltipPopupRef.current.setLngLat(coords).setHTML(html).addTo(mapRef.current);
+    };
+
+    const onCameraMouseLeave = () => {
+      resetCursor();
+      if (tooltipPopupRef.current) {
+        tooltipPopupRef.current.remove();
+      }
+    };
+
     const onClusterClick = (e: maplibregl.MapLayerMouseEvent) => {
       const features = map.queryRenderedFeatures(e.point, { layers: ["camera-clusters"] });
       const clusterId = features[0]?.properties?.cluster_id;
@@ -444,10 +685,11 @@ export const MapContainer: React.FC<MapContainerProps> = ({
 
     map.on("style.load", onStyleLoad);
     map.on("click", onMapClick);
+    map.on("mousemove", onMapMouseMove);
     map.on("click", "camera-points", onCameraClick);
     map.on("click", "camera-clusters", onClusterClick);
-    map.on("mouseenter", "camera-points", setCursorPointer);
-    map.on("mouseleave", "camera-points", resetCursor);
+    map.on("mouseenter", "camera-points", onCameraMouseEnter);
+    map.on("mouseleave", "camera-points", onCameraMouseLeave);
     map.on("mouseenter", "camera-clusters", setCursorPointer);
     map.on("mouseleave", "camera-clusters", resetCursor);
     map.on("click", "route-alternatives-line", onRouteClick);
@@ -463,14 +705,16 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     return () => {
       window.clearTimeout(timer);
       observer.disconnect();
+      if (tooltipPopupRef.current) tooltipPopupRef.current.remove();
       markerRef.current.forEach((m) => m.remove());
       markerRef.current = [];
       map.off("style.load", onStyleLoad);
       map.off("click", onMapClick);
+      map.off("mousemove", onMapMouseMove);
       map.off("click", "camera-points", onCameraClick);
       map.off("click", "camera-clusters", onClusterClick);
-      map.off("mouseenter", "camera-points", setCursorPointer);
-      map.off("mouseleave", "camera-points", resetCursor);
+      map.off("mouseenter", "camera-points", onCameraMouseEnter);
+      map.off("mouseleave", "camera-points", onCameraMouseLeave);
       map.off("mouseenter", "camera-clusters", setCursorPointer);
       map.off("mouseleave", "camera-clusters", resetCursor);
       map.off("click", "route-alternatives-line", onRouteClick);
@@ -575,6 +819,26 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     }
   }, [currentLocation, locationFocusToken]);
 
+  useEffect(() => {
+    mapRef.current?.easeTo({ pitch, duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 850 });
+  }, [pitch]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !spatialDark) return;
+    const data = cameras.filter(c => hasVerifiedFloodObservation(c) && Number.isFinite(c.lng) && Number.isFinite(c.lat));
+    const layers = showFloodObservations ? [new ScatterplotLayer<CameraEvidence>({
+      id: "verified-water-observations", data, getPosition: c => [c.lng, c.lat],
+      getRadius: 35, radiusMinPixels: 8, radiusMaxPixels: 18,
+      getFillColor: c => c.risk_level === "CRITICAL" ? [255, 110, 130, 130] : [135, 170, 195, 130],
+      stroked: true, getLineColor: [200, 220, 235, 210], lineWidthMinPixels: 1,
+      pickable: false,
+    })] : [];
+    const overlay = new MapboxOverlay({ interleaved: false, layers });
+    map.addControl(overlay);
+    return () => { if (mapRef.current === map) map.removeControl(overlay); };
+  }, [cameras, showFloodObservations, spatialDark, styleVersion]);
+
   return (
     <div className="relative w-full h-full min-h-0 overflow-hidden bg-pearl-100">
       <div ref={containerRef} className="w-full h-full" aria-label="Bản đồ tuyến đường" data-testid="route-map" />
@@ -595,8 +859,12 @@ export const MapContainer: React.FC<MapContainerProps> = ({
         </div>
       )}
 
+      {showFloodObservations && <div className="water-layer-legend liquid-island" role="status">
+        {cameras.some(c => hasVerifiedFloodObservation(c)) ? "Điểm quan trắc nước đã xác minh · không biểu thị độ sâu" : "Chưa có quan trắc nước đủ xác minh để hiển thị"}
+      </div>}
+
       {/* Floating Liquid Glass Controls: Floating Camera Toggle */}
-      <div className="absolute top-3.5 right-14 z-10 flex flex-col items-end gap-2">
+      <div className="map-camera-controls absolute top-3.5 right-14 z-10 flex flex-col items-end gap-2">
         <GlassToggle
           checked={showCameras}
           onChange={handleToggleCameras}

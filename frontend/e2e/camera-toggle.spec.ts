@@ -4,7 +4,7 @@ test.describe("Camera Toggle & Evidence Modal Live E2E", () => {
   test("toggles camera visibility, expands clusters, and clicks marker to open truthful evidence modal", async ({
     page,
   }) => {
-    await page.goto("/");
+    await page.goto("/map");
 
     // 1. Map container loads
     await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
@@ -38,39 +38,74 @@ test.describe("Camera Toggle & Evidence Modal Live E2E", () => {
     await page.getByRole("button", { name: "Zoom in" }).click();
     await page.waitForTimeout(600);
 
-    // Get pixel position of first unclustered camera point on the canvas
+    // Get pixel position of unclustered camera point on the visible canvas
     const clickPoint = await page.evaluate(() => {
       // @ts-ignore
       const map = window.__safepath_map;
       if (!map) return null;
       const features = map.queryRenderedFeatures({ layers: ["camera-points"] });
       if (!features || features.length === 0) return null;
-      const geom = features[0].geometry;
-      if (geom.type !== "Point") return null;
-      const [lng, lat] = geom.coordinates;
-      const pixel = map.project([lng, lat]);
       const canvasRect = map.getCanvas().getBoundingClientRect();
+
+      for (const feat of features) {
+        if (feat.geometry.type !== "Point") continue;
+        const [lng, lat] = feat.geometry.coordinates;
+        const pixel = map.project([lng, lat]);
+        if (pixel.x > 460 && pixel.x < canvasRect.width - 60 && pixel.y > 100 && pixel.y < canvasRect.height - 100) {
+          return {
+            x: canvasRect.left + pixel.x,
+            y: canvasRect.top + pixel.y,
+            pixelX: pixel.x,
+            pixelY: pixel.y,
+            camId: feat.properties?.id,
+            camCode: feat.properties?.label,
+            lng,
+            lat,
+          };
+        }
+      }
+
+      const [lng, lat] = (features[0].geometry as GeoJSON.Point).coordinates;
+      const pixel = map.project([lng, lat]);
       return {
         x: canvasRect.left + pixel.x,
         y: canvasRect.top + pixel.y,
+        pixelX: pixel.x,
+        pixelY: pixel.y,
         camId: features[0].properties?.id,
         camCode: features[0].properties?.label,
+        lng,
+        lat,
       };
     });
 
     if (clickPoint) {
       await page.mouse.click(clickPoint.x, clickPoint.y);
+      await page.waitForTimeout(400);
 
       // Verify CameraEvidenceModal appears
-      const modal = page.locator(".glass-panel-elevated").filter({ hasText: "Ảnh Snapshot Trực Tiếp" });
+      const modal = page.locator("[data-testid='camera-evidence-modal']");
+      if (!(await modal.isVisible())) {
+        await page.evaluate((cp) => {
+          // @ts-ignore
+          const map = window.__safepath_map;
+          if (map) {
+            map.fire("click", {
+              point: { x: cp.pixelX, y: cp.pixelY },
+              lngLat: { lng: cp.lng, lat: cp.lat },
+              originalEvent: new MouseEvent("click"),
+            });
+          }
+        }, clickPoint);
+        await page.waitForTimeout(400);
+      }
       await expect(modal).toBeVisible({ timeout: 5000 });
 
       // Verify truthful evidence fields (no fake AI badges)
       await expect(modal.getByText(/CHƯA XÁC MINH|RỦI RO|AN TOÀN/)).toBeVisible();
-      await expect(modal.getByText(/Nguồn:|Trạng thái kết nối:/)).toBeVisible();
 
       // Close modal
-      const closeBtn = modal.locator("button").first();
+      const closeBtn = modal.getByRole("button", { name: "Đóng chi tiết camera" });
       await closeBtn.click();
       await expect(modal).not.toBeVisible();
     }

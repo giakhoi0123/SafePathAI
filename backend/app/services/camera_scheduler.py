@@ -232,11 +232,13 @@ class CameraScheduler:
             INSERT INTO camera_ingestion_state (
                 cam_id, source_status, last_attempt_at, last_success_at,
                 last_captured_at, last_retrieved_at, next_retry_at, failure_count,
-                http_status, validation_status, image_hash, last_error_code
+                http_status, validation_status, image_hash, last_error_code,
+                last_checked_url, cached_image_path, failure_reason
             ) VALUES (
                 :cam_id, :source_status, :now, :last_success_at,
                 :last_captured_at, :last_retrieved_at, :next_retry_at, :failure_count,
-                :http_status, :validation_status, :image_hash, :last_error_code
+                :http_status, :validation_status, :image_hash, :last_error_code,
+                :last_checked_url, :cached_image_path, :failure_reason
             )
             ON CONFLICT (cam_id) DO UPDATE SET
                 source_status = :source_status,
@@ -249,7 +251,10 @@ class CameraScheduler:
                 http_status = :http_status,
                 validation_status = :validation_status,
                 image_hash = COALESCE(:image_hash, camera_ingestion_state.image_hash),
-                last_error_code = :last_error_code
+                last_error_code = :last_error_code,
+                last_checked_url = :last_checked_url,
+                cached_image_path = COALESCE(:cached_image_path, camera_ingestion_state.cached_image_path),
+                failure_reason = :failure_reason
         """)
 
         await session.execute(upsert_sql, {
@@ -265,6 +270,12 @@ class CameraScheduler:
             "validation_status": val_status,
             "image_hash": res.etag if res.is_valid_image else None,
             "last_error_code": err_code,
+            "last_checked_url": f"https://giaothong.hochiminhcity.gov.vn:8007/Render/CameraHandler.ashx?id={cam_id}",
+            "cached_image_path": res.image_path if res.is_valid_image else None,
+            "failure_reason": res.error_message or (
+                "Server returned 'IMAGE NOT AVAILABLE' placeholder frame"
+                if res.image_status_reason == "PLACEHOLDER_FRAME" else None
+            ),
         })
         await session.commit()
 

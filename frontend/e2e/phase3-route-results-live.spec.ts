@@ -11,7 +11,7 @@ test("live OSRM alternatives select their own geometry, camera toggle preserves 
   expect(response.status()).toBe(200);
   const data = await response.json();
   const routes = [data, ...(data.alternative_routes || [])];
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
   await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();
@@ -61,7 +61,7 @@ test("one live route reports no alternative", async ({ page }) => {
   expect(response.status()).toBe(200);
   const data = await response.json();
   expect(data.alternative_routes || []).toHaveLength(0);
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
   await page.getByRole("button", { name: "Sân bay Tân Sơn Nhất" }).click();
@@ -75,7 +75,7 @@ test("one live route reports no alternative", async ({ page }) => {
 
 test("mobile sheet leaves map visible without horizontal overflow", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("/map");
   await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
   await expect(page.getByRole("button", { name: "Mở bảng tuyến đường" })).toBeVisible();
   await page.getByRole("button", { name: "Mở bảng tuyến đường" }).click();
@@ -97,7 +97,7 @@ test("mobile sheet leaves map visible without horizontal overflow", async ({ pag
 test("404 and 503 show retry without fabricated geometry", async ({ page }) => {
   for (const [status, code] of [[404, "NO_ROUTE_FOUND"], [503, "ROUTING_PROVIDER_UNAVAILABLE"]] as const) {
     await page.route("**/api/v1/routes/search", async (route) => route.fulfill({ status, contentType: "application/json", body: JSON.stringify({ detail: { code, message: "Tuyến không khả dụng" } }) }));
-    await page.goto("/");
+    await page.goto("/map");
     await expect(page.locator(".maplibregl-canvas")).toBeVisible({ timeout: 15000 });
     await page.getByRole("button", { name: "Chợ Bến Thành" }).click();
     await page.getByRole("button", { name: "Ngã tư Hàng Xanh" }).click();

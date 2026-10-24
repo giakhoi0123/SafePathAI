@@ -8,7 +8,7 @@ test.describe("Phase 1 Geocoding & Place Search Live", () => {
     page,
   }) => {
     test.setTimeout(60000);
-    await page.goto("/");
+    await page.goto("/map");
 
     // 1. First query: "Nguyễn Huệ" (Street in District 1, not in HCMC_PRESETS)
     const originInput = page.getByRole("combobox", { name: "Từ đâu? Điểm xuất phát" });
@@ -61,7 +61,7 @@ test.describe("Phase 1 Geocoding & Place Search Live", () => {
   });
 
   test("direct coordinate input parsing (lat, lng)", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/map");
 
     const originInput = page.getByRole("combobox", { name: "Từ đâu? Điểm xuất phát" });
     await originInput.fill("10.7725, 106.6980");
@@ -77,7 +77,7 @@ test.describe("Phase 1 Geocoding & Place Search Live", () => {
   });
 
   test("short query (< 3 chars) does not trigger provider suggestions", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/map");
 
     const originInput = page.getByRole("combobox", { name: "Từ đâu? Điểm xuất phát" });
     await originInput.fill("sg");
@@ -89,7 +89,7 @@ test.describe("Phase 1 Geocoding & Place Search Live", () => {
   });
 
   test("search button is disabled when origin or destination is cleared", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/map");
 
     // Clear origin input
     const clearOriginBtn = page.locator("[data-testid='origin-combobox'] button[aria-label='Xóa nội dung']");
@@ -116,7 +116,7 @@ test.describe("Phase 1 Geocoding & Place Search Live", () => {
       accuracy: 25,
     });
 
-    await page.goto("/");
+    await page.goto("/map");
 
     // Click "Vị trí của tôi" button
     const locateBtn = page.getByRole("button", { name: "Vị trí của tôi" }).first();
@@ -142,7 +142,7 @@ test.describe("Phase 1 Geocoding & Place Search Live", () => {
     // Clear permissions to simulate user denying location access
     await context.clearPermissions();
 
-    await page.goto("/");
+    await page.goto("/map");
 
     const locateBtn = page.getByRole("button", { name: "Vị trí của tôi" }).first();
     await expect(locateBtn).toBeVisible();

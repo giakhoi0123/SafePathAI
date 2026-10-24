@@ -212,3 +212,20 @@ Triển khai và Nghiệm thu thực nghiệm:
    - `README.md`: Cập nhật sơ đồ kiến trúc Mermaid, bảng benchmark thực tế, hướng dẫn cài đặt.
 
 
+
+## 24/10/2026 — Kiểm toán sửa hồi quy giao diện Spatial (trước triển khai)
+
+Đọc lại Codex.md, Antigravity.md, README, contracts, routing/risk/weather, ingestion/vision, API, DB/session, frontend, các test live và runbook. Giao diện Spatial trước đó vi phạm Zero-Mock: dữ liệu minh họa không được phép ngay cả khi có nhãn. Không xem các test WebSocket interception cũ là bằng chứng live.
+
+| Component | Có code | Dịch vụ thật hiện kiểm tra | File | Lỗi / tác động | Ưu tiên | Test đối chứng | Trạng thái trước sửa |
+|---|---|---|---|---|---|---|---|
+| Landing | Có | Chỉ gọi camera; các metric khác dựng | frontend/src/app/page.tsx | 800+, 54 xe, 48.2%, 42mm/h, +1.68m, điểm số theo cuộn và tiết kiệm 45 phút không từ API | P0 | So DOM với response API thật | MISSING |
+| Thành phố và tuyến landing | Có | SVG tự dựng | components/spatial/CityScene.tsx | Đường và tuyến không lấy từ OSM/OSRM | P0 | Bản đồ tile thật, không tạo tuyến khi chưa tìm đường | MISSING |
+| HUD / Dock / Deck.gl | Có | Có API thật nhưng thêm nhánh demo | SpatialDashboard.tsx, VoiceHUD.tsx, MapContainer.tsx | Cảnh báo giả, tuyến hardcode; cột cao suy từ tỷ lệ pixel có thể bị hiểu là độ sâu | P0 | Tìm tuyến OSRM, đối chiếu GeoJSON, kiểm tra nút chỉ hoạt động trên số đo thật | PARTIAL |
+| WebSocket | Có | Backend có nhánh demo vừa thêm | backend/app/main.py, services/api.ts | Cho phép dựng cảnh báo SIMULATED | P0 | Gửi lệnh demo cũ rồi ping: chỉ nhận pong | PARTIAL |
+| Camera | Có | API trả 796 tọa độ; ảnh và inference có thật | main.py, vision.py, CameraEvidenceModal.tsx | Một số ảnh thiếu captured_at; không được gọi là quan trắc trực tiếp. Metadata có nguy cơ gán thời điểm kiểm tra file làm thời điểm nhận ảnh | P0 | API metadata và dấu thời gian cache | PARTIAL |
+| Model / thời tiết | Có | models/status: YOLOv5n EXPERIMENTAL, flood MODEL_UNAVAILABLE; weather: rain LIVE, tide TIDE_UNAVAILABLE | models/status, weather-tide | UI phải giữ null và nguồn/timestamp; không dùng công thức không tồn tại trong backend | P0 | So khớp API thật | PARTIAL |
+| Tuyến OSRM | Có | /health OSRM available, DB/Redis healthy | routing.py, RouteResults.tsx | Mức rủi ro UNKNOWN là kết quả đúng khi chưa khớp đoạn đường/camera | P0 | Live route search và đối chiếu geometry | PARTIAL |
+| Trang hồ sơ | Có | Saved places/history qua API | app/dashboard/page.tsx | Có địa điểm khách giả; lưu địa chỉ bất kỳ tại tâm TP; báo gửi phản ánh thành công không có API | P1 | Không tự tạo saved place/tọa độ, không báo thành công khi chưa lưu | PARTIAL |
+
+Giá trị thực được quan sát lúc kiểm toán, không dùng làm hằng số runtime: summary 796 đăng ký, 547 đã kiểm tra, 29 ảnh nhận gần đây; những số này thay đổi theo worker. Mưa trả 0.0 từ Open-Meteo có timestamp, triều null; không suy toàn thành phố an toàn từ các dữ liệu đó.

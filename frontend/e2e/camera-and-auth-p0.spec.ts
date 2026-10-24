@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 
 test.describe("P0 Production Recovery: Camera Ingestion, MapLibre Rendering & Auth", () => {
   test("1. MapLibre camera rendering, toggle reliability, and filter switching", async ({ page }) => {
-    await page.goto("/");
+    await page.goto("/map");
 
     // Map container exists
     const mapContainer = page.locator("[data-testid='route-map']");
@@ -56,7 +56,7 @@ test.describe("P0 Production Recovery: Camera Ingestion, MapLibre Rendering & Au
     await expect(mapContainer).toHaveAttribute("data-camera-feature-count", /^[1-9]\d*$/);
   });
 
-  test("2. Real Google OAuth state on /account: No fake profile, transparent BLOCKED_CONFIGURATION", async ({ page }) => {
+  test("2. Real Google OAuth state on /account: Configured credentials, No fake profile, Login button enabled", async ({ page }) => {
     await page.goto("/account");
 
     // Must show truthful guest state
@@ -70,13 +70,13 @@ test.describe("P0 Production Recovery: Camera Ingestion, MapLibre Rendering & Au
     const fakeEmail = page.locator("text=an.nguyen@example.com");
     await expect(fakeEmail).not.toBeVisible();
 
-    // Must show transparent BLOCKED_CONFIGURATION banner when credentials missing
-    await expect(page.locator("text=BLOCKED_CONFIGURATION").first()).toBeVisible();
-    await expect(page.locator("text=AUTH_GOOGLE_ID").first()).toBeVisible();
-    await expect(page.locator("text=AUTH_GOOGLE_SECRET").first()).toBeVisible();
-    // Google login button exists
-    const googleLoginBtn = page.locator("button:has-text('Tiếp tục với Google')");
+    // With Google OAuth credentials configured, BLOCKED_CONFIGURATION banner must be hidden
+    await expect(page.locator("text=BLOCKED_CONFIGURATION")).not.toBeVisible();
+
+    // Google login button exists and is enabled
+    const googleLoginBtn = page.getByRole("button", { name: "Tiếp tục với Google" });
     await expect(googleLoginBtn).toBeVisible();
+    await expect(googleLoginBtn).toBeEnabled();
 
     // Saved places and history must be empty in guest state
     await expect(page.locator("text=Bạn đang ở chế độ khách. Hãy đăng nhập tài khoản để lưu các địa điểm yêu thích.")).toBeVisible();
@@ -92,6 +92,28 @@ test.describe("P0 Production Recovery: Camera Ingestion, MapLibre Rendering & Au
     expect(data.geolocated_cameras).toBe(796);
     expect(data.tracked_in_scheduler).toBeGreaterThanOrEqual(1);
     expect(data.recent_hour_attempts).toBeGreaterThanOrEqual(1);
+  });
+
+  test("4. Google Sign-in button triggers redirect toward accounts.google.com", async ({ page }) => {
+    await page.goto("/account");
+
+    const googleLoginBtn = page.getByRole("button", { name: "Tiếp tục với Google" });
+    await expect(googleLoginBtn).toBeVisible();
+    await expect(googleLoginBtn).toBeEnabled();
+
+    // Intercept navigation request toward Google OAuth authorization endpoint
+    const redirectPromise = page.waitForRequest(
+      (req) => req.url().startsWith("https://accounts.google.com/o/oauth2/v2/auth"),
+      { timeout: 10000 }
+    );
+
+    await googleLoginBtn.click();
+    const googleReq = await redirectPromise;
+
+    expect(googleReq.url()).toContain("redirect_uri=http%3A%2F%2Flocalhost%3A3000%2Fapi%2Fauth%2Fcallback%2Fgoogle");
+    expect(googleReq.url()).toContain("response_type=code");
+    expect(googleReq.url()).toContain("scope=openid%20email%20profile");
+    expect(googleReq.url()).toContain("code_challenge_method=S256");
   });
 });
 

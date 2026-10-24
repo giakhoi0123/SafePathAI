@@ -1,6 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import { cameraObservationStatus, observationTime } from "../lib/observations";
+import React, { useEffect, useRef, useState } from "react";
 import {
   CameraEvidence,
   CameraImageMetadata,
@@ -9,7 +10,12 @@ import {
   ImageAccessStatus,
   RiskLevel,
 } from "../types/contracts";
-import { fetchCameraMetadata, getCameraImageUrl, getCameraEnhancedImageUrl } from "../services/api";
+import {
+  fetchCameraMetadata,
+  getCameraImageUrl,
+  getCameraEnhancedImageUrl,
+  getCameraAnalyzedImageUrl,
+} from "../services/api";
 import {
   X,
   AlertTriangle,
@@ -18,7 +24,7 @@ import {
   Car,
   Droplets,
   Clock,
-  MapPin,
+  Camera,
   Radio,
   Info,
   ImageOff,
@@ -32,6 +38,7 @@ import {
 } from "lucide-react";
 
 interface CameraEvidenceModalProps {
+  inspector?: boolean;
   camera: CameraEvidence | null;
   onClose: () => void;
 }
@@ -39,25 +46,49 @@ interface CameraEvidenceModalProps {
 export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
   camera,
   onClose,
+  inspector = false,
 }) => {
-  const [activeView, setActiveView] = useState<"original" | "enhanced">("original");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!camera) return;
+    const previous = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus();
+    const close = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("keydown", close); previous?.focus(); };
+  }, [camera?.cam_id]);
+  const [activeView, setActiveView] = useState<"original" | "enhanced" | "analyzed">("original");
   const [imageError, setImageError] = useState(false);
   const [metadata, setMetadata] = useState<CameraImageMetadata | null>(null);
   const [, setIsLoadingMetadata] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [cooldown, setCooldown] = useState(0);
+
+  // Cooldown countdown timer
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const interval = setInterval(() => {
+      setCooldown((c) => Math.max(0, c - 1));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [cooldown]);
 
   // Load technical snapshot metadata whenever modal opens
   useEffect(() => {
     if (!camera) {
       setMetadata(null);
       setImageError(false);
+      setActiveView("original");
       return;
     }
+    let active = true;
+    setMetadata(null);
     setImageError(false);
     setIsLoadingMetadata(true);
 
     fetchCameraMetadata(camera.cam_id)
       .then((meta) => {
+        if (!active) return;
         setMetadata(meta);
         if (!meta.has_image) {
           setImageError(true);
@@ -67,8 +98,9 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
         // Fallback to basic camera object if metadata endpoint fails
       })
       .finally(() => {
-        setIsLoadingMetadata(false);
+        if (active) setIsLoadingMetadata(false);
       });
+    return () => { active = false; };
   }, [camera?.cam_id, refreshKey]);
 
   if (!camera) return null;
@@ -215,6 +247,8 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
   };
 
   const handleRetry = () => {
+    if (cooldown > 0) return;
+    setCooldown(5);
     setImageError(false);
     setRefreshKey((k) => k + 1);
   };
@@ -223,12 +257,35 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
   const currentImageUrl =
     activeView === "enhanced"
       ? getCameraEnhancedImageUrl(camera.cam_id)
+      : activeView === "analyzed"
+      ? getCameraAnalyzedImageUrl(camera.cam_id)
       : getCameraImageUrl(camera.cam_id);
+
+  const sourceUrl =
+    metadata?.source_url ||
+    (camera as any).source_url ||
+    (camera as any).provider_snapshot_url ||
+    (camera.cam_id ? `http://giaothong.hochiminhcity.gov.vn:8007/Render/CameraHandler.ashx?id=${camera.cam_id}` : undefined);
+
+  const isPlaceholder = Boolean(
+    camera.image_status_reason?.includes("PLACEHOLDER") ||
+    metadata?.image_status_reason?.includes("PLACEHOLDER") ||
+    (metadata as any)?.failure_reason?.includes("PLACEHOLDER") ||
+    (!metadata?.has_image && !camera.has_image)
+  );
+
+  const retrievedAt = metadata?.retrieved_at ?? camera.retrieved_at;
+  const capturedAtRaw = metadata?.captured_at || (camera as any).captured_at;
+  const capturedAtDate = capturedAtRaw ? new Date(capturedAtRaw) : null;
 
   return (
     <div
+      ref={dialogRef}
+      tabIndex={-1}
+      role="dialog"
+      aria-label={`Bằng chứng camera ${camera.name}`}
       data-testid="camera-evidence-modal"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md animate-fadeIn"
+      className={inspector ? "evidence-inspector spatial-dark-panel" : "fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md animate-fadeIn"}
     >
       <div
         className="relative w-full max-w-2xl glass-panel-elevated rounded-3xl shadow-glass-elevated overflow-hidden flex flex-col border border-white/95 text-ink-900"
@@ -238,7 +295,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
         <div className="flex items-center justify-between p-5 border-b border-slate-200/80 bg-white/70">
           <div className="flex items-center gap-3">
             <div className="p-2.5 bg-indigo-50 border border-indigo-100 rounded-2xl text-indigo-600">
-              <MapPin className="w-5 h-5" />
+              <Camera className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
@@ -270,18 +327,28 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
           {/* Status Badges Row */}
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-2 flex-wrap">
-              {getStatusBadge(camera.source_status)}
+              {getStatusBadge(cameraObservationStatus(camera) as DataSourceStatus)}
               {getRiskBadge(camera.risk_level)}
               {getImageAccessBadge()}
               {getEligibilityBadge()}
             </div>
-            <div className="text-xs text-ink-500 flex items-center gap-1.5 font-mono">
-              <Clock className="w-3.5 h-3.5 text-ink-400" />
-              <span>Tiếp nhận: {updatedDate.toLocaleTimeString("vi-VN")} ({freshnessText})</span>
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 text-xs font-mono text-ink-600">
+              <div className="flex items-center gap-1.5" title="Thời điểm hệ thống SafePathAI nạp snapshot">
+                <Clock className="w-3.5 h-3.5 text-indigo-500" />
+                <span>Nhận ảnh: {observationTime(retrievedAt)}</span>
+              </div>
+              <div className="flex items-center gap-1.5" title="Thời điểm camera ghi hình thực tế">
+                <Radio className="w-3.5 h-3.5 text-slate-400" />
+                <span>
+                  Chụp: {capturedAtDate && !isNaN(capturedAtDate.getTime())
+                    ? capturedAtDate.toLocaleTimeString("vi-VN")
+                    : "Chưa xác minh watermark"}
+                </span>
+              </div>
             </div>
           </div>
 
-          {/* View Toggle Tabs: Original vs Enhanced + Image Quality Badge */}
+          {/* View Toggle Tabs: Original vs Enhanced vs Analyzed + Image Quality Badge */}
           <div className="flex items-center justify-between flex-wrap gap-2 pt-1">
             <div className="inline-flex p-1 bg-white/70 backdrop-blur-md rounded-2xl border border-white/90 shadow-glass-sm text-xs">
               <button
@@ -313,6 +380,21 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 <span>Ảnh tăng cường (Hỗ trợ AI)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setImageError(false);
+                  setActiveView("analyzed");
+                }}
+                className={`px-3 py-1.5 rounded-xl font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                  activeView === "analyzed"
+                    ? "bg-gradient-to-r from-emerald-600 to-teal-500 text-white shadow-sm"
+                    : "text-ink-600 hover:text-ink-950"
+                }`}
+              >
+                <Car className="w-3.5 h-3.5" />
+                <span>Phát hiện AI (Overlay)</span>
               </button>
             </div>
 
@@ -352,14 +434,18 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                 </div>
                 <div>
                   <span className="font-semibold text-xs text-ink-900 block">
-                    {accessStatus === ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED
+                    {isPlaceholder
+                      ? "Camera hiện chưa cung cấp ảnh hợp lệ"
+                      : accessStatus === ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED
                       ? "Cổng Giao Thông Hạn Chế Truy Cập Trực Tiếp (HTTP 403)"
                       : "Chưa có ảnh snapshot trong bộ đệm"}
                   </span>
                   <p className="text-[11px] text-ink-500 max-w-md mt-1 leading-relaxed">
-                    {accessStatus === ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED
+                    {isPlaceholder
+                      ? "Máy chủ camera của Cổng Giao thông TP.HCM đang phản hồi khung hình báo lỗi 'IMAGE NOT AVAILABLE' (tín hiệu camera gián đoạn hoặc thiết bị tại hiện trường đang mất kết nối). SafePathAI bảo vệ nguyên tắc Zero-Mock, tuyệt đối không dùng ảnh giả lập."
+                      : accessStatus === ImageAccessStatus.EXTERNAL_ACCESS_RESTRICTED
                       ? "Máy chủ Cổng Thông tin Giao thông TP.HCM yêu cầu xác thực phiên ASP.NET để truy xuất ảnh từ xa. SafePathAI tuyệt đối không sử dụng ảnh giả lập theo nguyên tắc Zero-Mock."
-                      : "Camera này chưa có ảnh snapshot được lưu hợp lệ hoặc khung hình nhận được là thông báo lỗi máy chủ (PLACEHOLDER_FRAME)."}
+                      : "Camera này chưa có ảnh snapshot được lưu hợp lệ hoặc khung hình nhận được chưa vượt qua kiểm định tính toàn vẹn."}
                   </p>
                 </div>
 
@@ -367,18 +453,21 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                   <button
                     type="button"
                     onClick={handleRetry}
-                    className="aurora-btn-primary flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold"
+                    disabled={cooldown > 0}
+                    className={`aurora-btn-primary flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold ${
+                      cooldown > 0 ? "opacity-60 cursor-not-allowed" : "cursor-pointer"
+                    }`}
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Thử tải lại</span>
+                    <RefreshCw className={`w-3.5 h-3.5 ${cooldown > 0 ? "animate-spin" : ""}`} />
+                    <span>{cooldown > 0 ? `Thử lại sau (${cooldown}s)` : "Thử tải lại"}</span>
                   </button>
 
-                  {metadata?.source_url && (
+                  {sourceUrl && (
                     <a
-                      href={metadata.source_url}
+                      href={sourceUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="glass-pill flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-ink-700 text-xs font-medium border border-slate-200 hover:text-ink-950 transition"
+                      className="glass-pill flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-ink-700 text-xs font-medium border border-slate-200 hover:text-ink-950 transition cursor-pointer"
                     >
                       <ExternalLink className="w-3.5 h-3.5" />
                       <span>Xem nguồn gốc Sở GTVT</span>
@@ -400,7 +489,9 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                 <div className="absolute top-3 left-3 glass-panel px-3 py-1.5 rounded-xl border border-white/90 text-[11px] text-ink-900 font-medium flex items-center gap-2 shadow-sm">
                   <div className={`w-2 h-2 rounded-full ${isModelAnalyzed ? "bg-emerald-500 animate-ping" : "bg-indigo-500"}`} />
                   <span>
-                    {activeView === "enhanced"
+                    {activeView === "analyzed"
+                      ? "Ảnh nhận diện AI • Hộp định danh phương tiện & Phân đoạn nước"
+                      : activeView === "enhanced"
                       ? "Ảnh xử lý tăng cường • Thích ứng sáng & chi tiết (Hỗ trợ AI)"
                       : isModelAnalyzed
                       ? "Ảnh gốc nguồn Sở GTVT • Đã phân tích ONNX"
@@ -412,7 +503,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                   <div className="absolute bottom-3 left-3 right-3 bg-rose-50/95 border border-rose-300 backdrop-blur-md p-2.5 rounded-xl text-xs text-rose-800 flex items-center gap-2 shadow-md">
                     <ShieldAlert className="w-4 h-4 text-rose-600 shrink-0" />
                     <span>
-                      <strong>Cảnh báo ngập sâu:</strong> Vùng nước chiếm {floodPercent}% mặt đường quan sát. Xe máy có nguy cơ chết máy cao!
+                      <strong>Tỷ lệ pixel nghi là nước:</strong> {floodPercent}% trong vùng quan sát. Không đủ cơ sở suy ra độ sâu hoặc khả năng đi qua.
                     </span>
                   </div>
                 )}
@@ -420,8 +511,18 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
             )}
           </div>
 
-          {/* Enhancement Notice & Quality Flags Bar */}
-          {activeView === "enhanced" ? (
+          {/* Enhancement / Detection Notice & Quality Flags Bar */}
+          {activeView === "analyzed" ? (
+            <div className="p-3 rounded-2xl bg-teal-50/80 border border-teal-200/80 text-[11px] text-teal-900 flex items-start gap-2 shadow-glass-sm">
+              <Car className="w-4 h-4 text-teal-600 shrink-0 mt-0.5" />
+              <div>
+                <strong className="block text-teal-950 font-bold">Lớp phủ nhận diện AI (Computer Vision Detection Overlay):</strong>
+                <p className="mt-0.5 text-teal-800 leading-relaxed">
+                  Khung hình hiển thị các phương tiện giao thông được mô hình YOLO phát hiện kèm hộp giới hạn nhận diện và phân vùng diện tích nước ngập. Toàn bộ phát hiện được đối chiếu từ dữ liệu hình ảnh camera nguồn thực tế.
+                </p>
+              </div>
+            </div>
+          ) : activeView === "enhanced" ? (
             <div className="p-3 rounded-2xl bg-indigo-50/80 border border-indigo-200/80 text-[11px] text-indigo-900 flex items-start gap-2 shadow-glass-sm">
               <Sparkles className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
               <div>
@@ -532,7 +633,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                 )}
               </div>
               <p className="text-[10px] text-ink-400 mt-2">
-                {isModelAnalyzed ? "YOLOv5n ONNX (COCO)" : "Chưa thực thi model"}
+                {isModelAnalyzed ? (camera.vehicle_model_name || "Mô hình từ backend") : "Chưa thực thi model"}
               </p>
             </div>
 
