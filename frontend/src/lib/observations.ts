@@ -80,9 +80,12 @@ export function cameraObservationStatus(
 }
 
 /** Water map points need actual ONNX segmentation and routing-grade spatial evidence. */
-export function hasVerifiedFloodObservation(camera: CameraEvidence): boolean {
+export function hasVerifiedFloodObservation(
+  camera: CameraEvidence,
+  now: number = Date.now()
+): boolean {
   return (
-    cameraObservationStatus(camera) === "LIVE" &&
+    cameraObservationStatus(camera, now) === "LIVE" &&
     camera.evidence_eligibility === EvidenceEligibility.ROUTING_ELIGIBLE &&
     camera.line_of_sight_verified === true &&
     camera.flood_model_status === "VERIFIED_ONNX_INFERENCE" &&
