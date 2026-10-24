@@ -110,9 +110,9 @@ services:
     restart: unless-stopped
     environment:
       INTERNAL_BACKEND_URL: http://backend:8000
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: ""
       NEXT_PUBLIC_WS_URL: ws://localhost:8000
-      AUTH_SECRET: ${AUTH_SECRET:-safepath_default_auth_secret_dev_32char_key}
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET in .env}
       AUTH_GOOGLE_ID: ${AUTH_GOOGLE_ID:-}
       AUTH_GOOGLE_SECRET: ${AUTH_GOOGLE_SECRET:-}
       NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
