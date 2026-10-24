@@ -71,7 +71,7 @@ function InnerAuthProvider({ children }: { children: React.ReactNode }) {
     let isMounted = true;
     async function checkAuthStatus() {
       try {
-        const res = await fetch("/api/v1/auth/status");
+        const res = await fetch("/api/auth/config", { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
           if (isMounted) {
