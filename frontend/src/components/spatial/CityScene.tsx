@@ -16,7 +16,7 @@ export function CityScene({ cameras, camera, scene }: { cameras: CameraEvidence[
     try {
       map = new maplibregl.Map({
         container: container.current,
-        style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+        style: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
         center: [106.7009, 10.7769], zoom: 12, pitch: 40,
         interactive: false, attributionControl: false,
       });
@@ -25,7 +25,18 @@ export function CityScene({ cameras, camera, scene }: { cameras: CameraEvidence[
     map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
     map.on("load", () => {
       map.addSource("observed-registry", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-      map.addLayer({ id: "registry-cameras", source: "observed-registry", type: "circle", paint: { "circle-radius": 3, "circle-color": "#9cb7c6", "circle-opacity": .75, "circle-stroke-width": 1, "circle-stroke-color": "#182b3b" } });
+      map.addLayer({
+        id: "registry-cameras",
+        source: "observed-registry",
+        type: "circle",
+        paint: {
+          "circle-radius": 4.5,
+          "circle-color": "#4F46E5",
+          "circle-opacity": 0.8,
+          "circle-stroke-width": 2,
+          "circle-stroke-color": "#FFFFFF",
+        },
+      });
       setReady(true); setFailed(false);
     });
     const timeout = setTimeout(() => { if (!map.loaded()) setFailed(true); }, 15000);

@@ -5,7 +5,7 @@ import { MapboxOverlay } from "@deck.gl/mapbox";
 import { ScatterplotLayer } from "@deck.gl/layers";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { CameraEvidence, Coordinates, MapSelectionMode, RouteSegmentRisk, SafeRouteResponse } from "../types/contracts";
+import { CameraEvidence, Coordinates, MapSelectionMode, RiskLevel, RouteSegmentRisk, SafeRouteResponse } from "../types/contracts";
 import { Camera, MapPin } from "lucide-react";
 import { hasVerifiedFloodObservation } from "../lib/observations";
 import GlassToggle, { CameraFilterMode } from "./Glass/GlassToggle";
@@ -243,7 +243,7 @@ export const MapContainer: React.FC<MapContainerProps> = ({
     if (!containerRef.current || mapRef.current) return;
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: spatialDark ? "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" : "https://tiles.openfreemap.org/styles/liberty",
+      style: spatialDark ? "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json" : "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
       pitch,
       center: [106.7009, 10.7769],
       zoom: 13,
@@ -458,14 +458,31 @@ export const MapContainer: React.FC<MapContainerProps> = ({
         type: "line",
         source: "route-recommended-source",
         layout: { "line-cap": "round", "line-join": "round" },
-        paint: { "line-color": "#15233D", "line-width": 11, "line-opacity": 0.95 },
+        paint: { "line-color": "#1E40AF", "line-width": 10, "line-opacity": 0.95 },
       });
       map.addLayer({
         id: "route-recommended-core",
         type: "line",
         source: "route-recommended-source",
+        filter: ["!has", "risk_level"],
         layout: { "line-cap": "round", "line-join": "round" },
-        paint: { "line-color": "#0284C7", "line-width": 6, "line-opacity": 1 },
+        paint: { "line-color": "#2563EB", "line-width": 6, "line-opacity": 1 },
+      });
+      map.addLayer({
+        id: "route-warning-segments",
+        type: "line",
+        source: "route-recommended-source",
+        filter: ["==", ["get", "risk_level"], "MODERATE"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#F59E0B", "line-width": 7, "line-opacity": 1 },
+      });
+      map.addLayer({
+        id: "route-critical-segments",
+        type: "line",
+        source: "route-recommended-source",
+        filter: ["==", ["get", "risk_level"], "CRITICAL"],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": "#EF4444", "line-width": 8, "line-opacity": 1 },
       });
 
       map.addSource("route-step-source", { type: "geojson", data: empty() });
@@ -729,9 +746,17 @@ export const MapContainer: React.FC<MapContainerProps> = ({
   useEffect(() => {
     const map = mapRef.current;
     if (!map?.getSource("route-recommended-source")) return;
+    const segmentRiskFeatures = (recommendedRoute?.segments || [])
+      .filter((s) => s.geojson_path && (s.risk_level === RiskLevel.MODERATE || s.risk_level === RiskLevel.CRITICAL))
+      .map((s) => ({
+        type: "Feature" as const,
+        properties: { routeId: recommendedRoute!.route_id, risk_level: s.risk_level },
+        geometry: s.geojson_path as GeoJSON.LineString,
+      }));
+
     setSource(map, "route-recommended-source", {
       type: "FeatureCollection",
-      features: recommendedRoute ? [lineFeature(recommendedRoute)] : [],
+      features: recommendedRoute ? [lineFeature(recommendedRoute), ...segmentRiskFeatures] : [],
     });
     setSource(map, "route-alternatives-source", {
       type: "FeatureCollection",

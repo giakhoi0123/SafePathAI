@@ -3,14 +3,36 @@
 @tailwind utilities;
 
 :root {
-  --background: #F7F9FF;
-  --foreground: #15233D;
-  --pearl-white: #F7F9FF;
+  --pearl: #F8FAFF;
+  --ice-white: #F1F8FF;
+  --mist-blue: #DCEEFF;
+  --mist-lavender: #E8E1FF;
+  --aurora-blue: #7C94FF;
+  --aurora-cyan: #67DCE5;
+  --aurora-purple: #A99AF7;
+
+  --ink-primary: #17263F;
+  --ink-secondary: #4E6280;
+  --ink-muted: #667B99;
+
+  --glass-surface: rgba(255, 255, 255, 0.72);
+  --glass-surface-strong: rgba(255, 255, 255, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.92);
+
+  --glass-shadow:
+    0 14px 42px rgba(75, 105, 160, 0.12),
+    0 3px 12px rgba(75, 105, 160, 0.06);
+  --glass-shadow-elevated:
+    0 20px 50px -6px rgba(75, 105, 160, 0.16),
+    0 8px 24px -4px rgba(21, 35, 61, 0.06);
+
+  --background: #F8FAFF;
+  --foreground: #17263F;
+  --pearl-white: #F8FAFF;
   --ice-blue: #DDF3FF;
   --soft-cyan: #CDEFFF;
-  --lavender-mist: #D9D2FF;
-  --aurora-blue: #7C94FF;
-  --deep-ink: #15233D;
+  --lavender-mist: #E8E1FF;
+  --deep-ink: #17263F;
 }
 
 body {
@@ -63,21 +85,99 @@ body {
 }
 
 .aurora-btn-primary {
-  background: linear-gradient(135deg, #5E77F8 0%, #7C94FF 50%, #38BDF8 100%);
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background: linear-gradient(135deg, #647BFA 0%, #7C94FF 50%, #56C7EE 100%);
   color: #ffffff;
-  box-shadow: 0 6px 20px -2px rgba(94, 119, 248, 0.38), inset 0 1px 1px 0 rgba(255, 255, 255, 0.4);
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  font-weight: 700;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow:
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.70),
+    0 10px 28px -4px rgba(100, 123, 250, 0.42),
+    0 3px 10px -2px rgba(21, 35, 61, 0.08);
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.aurora-btn-primary::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 60%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  transform: skewX(-20deg);
+  transition: left 0.6s ease;
+  pointer-events: none;
+}
+
+.aurora-btn-primary:hover:not(:disabled)::after {
+  left: 150%;
 }
 
 .aurora-btn-primary:hover:not(:disabled) {
-  background: linear-gradient(135deg, #4F6AF6 0%, #6E88FF 50%, #0EA5E9 100%);
-  box-shadow: 0 8px 26px -2px rgba(94, 119, 248, 0.48), inset 0 1px 1px 0 rgba(255, 255, 255, 0.6);
-  transform: translateY(-0.5px);
+  transform: translateY(-1.5px);
+  box-shadow:
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.85),
+    0 14px 34px -4px rgba(100, 123, 250, 0.52),
+    0 4px 12px -2px rgba(21, 35, 61, 0.12);
 }
 
 .aurora-btn-primary:active:not(:disabled) {
-  transform: translateY(0.5px);
-  box-shadow: 0 3px 12px -2px rgba(94, 119, 248, 0.35);
+  transform: translateY(0.5px) scale(0.98);
+  box-shadow:
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.50),
+    0 4px 14px -2px rgba(100, 123, 250, 0.35);
+}
+
+.aurora-btn-primary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  color: rgba(255, 255, 255, 0.85);
+  background: linear-gradient(135deg, #94A3B8, #CBD5E1);
+  box-shadow: none;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Glass Micro-interactions & Liquid Cards */
+.liquid-glass-surface {
+  position: relative;
+  isolation: isolate;
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.86), rgba(242, 248, 255, 0.68));
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.90);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 -1px 0 rgba(160, 185, 225, 0.15),
+    0 18px 48px rgba(68, 93, 145, 0.14),
+    0 3px 10px rgba(68, 93, 145, 0.05);
+  border-radius: 28px;
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.liquid-glass-surface:hover {
+  border-color: rgba(255, 255, 255, 0.98);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 1),
+    inset 0 -1px 0 rgba(160, 185, 225, 0.20),
+    0 24px 55px rgba(68, 93, 145, 0.18),
+    0 5px 14px rgba(68, 93, 145, 0.07);
+}
+
+/* Glass chip hover lift */
+.glass-chip-interactive {
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  cursor: pointer;
+}
+.glass-chip-interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px -2px rgba(124, 148, 255, 0.20);
+  border-color: rgba(124, 148, 255, 0.4);
+}
+.glass-chip-interactive:active {
+  transform: translateY(0) scale(0.98);
 }
 
 .aurora-gradient-text {

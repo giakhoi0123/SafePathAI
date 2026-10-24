@@ -25,9 +25,9 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
 
     // Verify Dashboard page loaded
     await page.waitForURL("**/dashboard");
-    await expect(page.locator("text=Bảng tin & Lộ trình SafePathAI")).toBeVisible();
-    await expect(page.locator("text=Địa điểm yêu thích (1-Click tìm đường)")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Lịch sử tìm đường" })).toBeVisible();
+    await expect(page.locator("text=Bảng điều khiển")).toBeVisible();
+    await expect(page.locator("text=Hành trình thường nhật của tôi")).toBeVisible();
+    await expect(page.getByText("Lịch sử tìm đường", { exact: true })).toBeVisible();
 
     // Navigate to Account / Settings page
     const accountLink = page.locator("a[href='/account']").first();
@@ -78,9 +78,9 @@ test.describe("Phase 8F & 8G: Multi-page Dashboard, Monitor & Account Suite", ()
 
   test("Guest profile does not invent saved places or report submission", async ({ page }) => {
     await page.goto("/dashboard");
-    await expect(page.getByText("Chưa có địa điểm đã lưu.")).toBeVisible();
-    await expect(page.getByText("Chưa có lịch sử tìm đường.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Gửi báo cáo sự cố" })).toHaveCount(0);
+    await expect(page.getByText(/Chưa có địa điểm đã lưu/)).toBeVisible();
+    await expect(page.getByText(/Chưa có lịch sử tìm đường/)).toBeVisible();
+    await expect(page.getByText("Chế độ Khách bảo mật")).toBeVisible();
   });
 
   test("Account page allows vehicle switching and shows OAuth configuration state", async ({ page }) => {

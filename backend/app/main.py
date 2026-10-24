@@ -96,9 +96,15 @@ from backend.app.services.vision import (
     verified_model_manifest_entry,
 )
 from backend.app.services.weather_tide import (
+    LocationWeatherResponse,
+    fetch_location_weather,
     get_cached_weather_tide,
     get_combined_weather_tide,
     sync_weather_tide_to_redis,
+)
+from backend.app.services.traffic_news import (
+    NearbyTrafficNewsResponse,
+    get_nearby_traffic_news,
 )
 
 logger = logging.getLogger("safepath.api")
@@ -444,6 +450,51 @@ async def get_weather_tide() -> WeatherTideSignal:
             return cached
         signal = await get_combined_weather_tide(redis_client=redis)
         return signal
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
+@app.get(
+    "/api/v1/weather/location",
+    response_model=LocationWeatherResponse,
+    summary="Get localized weather by exact GPS coordinates",
+    tags=["Environmental"],
+)
+async def get_location_weather(
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude"),
+    lng: float = Query(..., ge=-180.0, le=180.0, description="Longitude"),
+) -> LocationWeatherResponse:
+    """
+    Returns localized weather (temperature, precipitation, wind, weather code)
+    for any camera, user location, or route waypoint in HCMC.
+    """
+    redis = get_redis_client()
+    try:
+        return await fetch_location_weather(lat=lat, lng=lng, redis_client=redis)
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
+@app.get(
+    "/api/v1/traffic-news/nearby",
+    response_model=NearbyTrafficNewsResponse,
+    summary="Get real-time nearby traffic news and incident alerts",
+    tags=["Environmental"],
+)
+async def get_traffic_news_nearby(
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude"),
+    lng: float = Query(..., ge=-180.0, le=180.0, description="Longitude"),
+    radius_km: float = Query(3.0, ge=0.5, le=25.0, description="Radius in km"),
+) -> NearbyTrafficNewsResponse:
+    """
+    Returns verified municipal and news alerts (traffic jams, floods, accidents)
+    within radius_km from the requested coordinate.
+    """
+    redis = get_redis_client()
+    try:
+        return await get_nearby_traffic_news(lat=lat, lng=lng, radius_km=radius_km, redis_client=redis)
     finally:
         if redis is not None:
             await redis.aclose()

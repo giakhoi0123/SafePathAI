@@ -16,6 +16,8 @@ import {
   SafeRouteResponse,
   WeatherTideSignal,
   WebSocketAlertMessage,
+  LocationWeatherResponse,
+  NearbyTrafficNewsResponse,
 } from "../types/contracts";
 
 const API_BASE_URL =
@@ -317,5 +319,28 @@ export function connectAlertsWebSocket(
 export async function fetchModelStatus(): Promise<ModelStatusResponse> {
   const response = await fetch(`${API_BASE_URL}/api/v1/models/status`, { cache: "no-store" });
   if (!response.ok) throw new Error(`Không tải được trạng thái mô hình (${response.status}).`);
+  return response.json();
+}
+
+/** Fetches localized real-time weather at specific GPS coordinates */
+export async function getLocationWeather(lat: number, lng: number): Promise<LocationWeatherResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/weather/location?lat=${lat}&lng=${lng}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Không tải được thời tiết vị trí (${response.status}).`);
+  return response.json();
+}
+
+/** Fetches real-time municipal and verified traffic news in a radius */
+export async function getNearbyTrafficNews(
+  lat: number,
+  lng: number,
+  radiusKm = 3.0
+): Promise<NearbyTrafficNewsResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/v1/traffic-news/nearby?lat=${lat}&lng=${lng}&radius_km=${radiusKm}`,
+    { cache: "no-store" }
+  );
+  if (!response.ok) throw new Error(`Không tải được tin giao thông gần đây (${response.status}).`);
   return response.json();
 }

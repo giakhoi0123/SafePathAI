@@ -30,7 +30,7 @@ test("OSRM route appears on the live map", async ({ page }) => {
   await expect(page.getByText("Không tải được bản đồ.")).toHaveCount(0);
   await expect(page.locator(".maplibregl-marker").filter({ hasText: /^A$/ })).toBeVisible();
   await expect(page.locator(".maplibregl-marker").filter({ hasText: /^B$/ })).toBeVisible();
-  await expect(page.getByRole("link", { name: "OpenFreeMap" })).toBeVisible();
+  await expect(page.getByRole("link", { name: /CARTO|OpenFreeMap/i })).toBeVisible();
   await expect(page.getByRole("link", { name: "OpenStreetMap" })).toBeVisible();
   await page.screenshot({ path: "test-results/osrm-live-map-primary.png", fullPage: true });
   await page.getByRole("button", { name: "Zoom in" }).click();

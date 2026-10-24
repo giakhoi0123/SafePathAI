@@ -282,13 +282,13 @@ export const PlaceSearchCombobox: React.FC<PlaceSearchComboboxProps> = ({
               type="button"
               onClick={onLocateMe}
               disabled={isLocating}
-              className="flex items-center gap-1 text-[11px] font-medium text-indigo-700 hover:text-indigo-900 px-2.5 py-1 rounded-full bg-white/80 hover:bg-white border border-indigo-200/80 shadow-glass-sm transition disabled:opacity-50"
+              className="flex items-center gap-1.5 text-[11px] font-bold text-indigo-700 hover:text-indigo-950 px-3 py-1 rounded-full bg-gradient-to-r from-ice-100/90 to-white/90 hover:from-white hover:to-ice-200/90 border border-indigo-200/90 shadow-glass-sm hover:shadow-glass hover:-translate-y-0.5 transition-all duration-200 disabled:opacity-50 select-none cursor-pointer"
               title="Lấy vị trí GPS hiện tại của thiết bị"
             >
               {isLocating ? (
-                <Loader2 className="w-3 h-3 animate-spin text-indigo-600" />
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600 shrink-0" />
               ) : (
-                <Crosshair className="w-3 h-3 text-indigo-600" />
+                <Crosshair className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
               )}
               <span>Vị trí của tôi</span>
             </button>
@@ -297,14 +297,14 @@ export const PlaceSearchCombobox: React.FC<PlaceSearchComboboxProps> = ({
             <button
               type="button"
               onClick={onTogglePickOnMap}
-              className={`flex items-center gap-1 text-[11px] font-medium px-2.5 py-1 rounded-full border transition ${
+              className={`flex items-center gap-1.5 text-[11px] font-bold px-3 py-1 rounded-full border transition-all duration-200 select-none cursor-pointer ${
                 isPickingOnMap
-                  ? "bg-amber-100 text-amber-800 border-amber-300 font-bold shadow-sm"
-                  : "bg-white/80 text-ink-600 hover:text-ink-900 border-slate-200/80 hover:bg-white shadow-glass-sm"
+                  ? "bg-amber-100/90 text-amber-900 border-amber-300 shadow-sm"
+                  : "bg-white/85 text-ink-700 hover:text-ink-950 border-white/90 hover:bg-white shadow-glass-sm hover:-translate-y-0.5 hover:shadow-glass"
               }`}
               title="Bật chế độ chọn điểm này trực tiếp bằng cách click trên bản đồ"
             >
-              <MapPin className="w-3 h-3 text-amber-500" />
+              <MapPin className="w-3.5 h-3.5 text-amber-500 shrink-0" />
               <span>{isPickingOnMap ? "Đang chọn trên map" : "Chọn trên map"}</span>
             </button>
           )}
@@ -339,7 +339,7 @@ export const PlaceSearchCombobox: React.FC<PlaceSearchComboboxProps> = ({
             else if (value.trim().length >= 3) performSearch(value);
           }}
           placeholder={placeholder}
-          className="w-full glass-input rounded-2xl pl-10 pr-9 py-2.5 text-xs font-medium text-ink-900 placeholder:text-ink-400 focus:outline-none"
+          className="w-full bg-white/90 hover:bg-white focus:bg-white text-ink-950 text-xs font-semibold placeholder:text-ink-400 rounded-2xl pl-10 pr-9 py-2.5 border border-indigo-100/90 shadow-glass-sm focus:shadow-glass focus:border-indigo-400 focus:ring-4 focus:ring-indigo-400/20 outline-none transition-all duration-200"
         />
         {isLoading && (
           <div className="absolute inset-y-0 right-3 flex items-center">
@@ -373,7 +373,7 @@ export const PlaceSearchCombobox: React.FC<PlaceSearchComboboxProps> = ({
       {isOpen && (
         <div
           role="listbox"
-          className="absolute left-0 right-0 top-full mt-1.5 glass-panel-elevated rounded-2xl border border-white/95 shadow-glass-elevated z-50 max-h-60 overflow-y-auto divide-y divide-slate-100 p-1"
+          className="absolute left-0 right-0 top-full mt-2 rounded-2xl border border-white/95 bg-white/95 backdrop-blur-2xl shadow-glass-elevated z-50 max-h-64 overflow-y-auto divide-y divide-slate-100/80 p-1.5 animate-fadeIn"
         >
           {suggestions.length > 0 ? (
             suggestions.map((item) => (
@@ -389,21 +389,21 @@ export const PlaceSearchCombobox: React.FC<PlaceSearchComboboxProps> = ({
                     handleSelect(item);
                   }
                 }}
-                className="p-2.5 rounded-xl hover:bg-gradient-to-r hover:from-indigo-50/80 hover:to-ice-100/60 cursor-pointer transition text-left flex items-start gap-2.5 focus:bg-indigo-50/80 focus:outline-none"
+                className="p-3 rounded-xl hover:bg-gradient-to-r hover:from-indigo-50/90 hover:to-ice-100/70 cursor-pointer transition text-left flex items-start gap-3 focus:bg-indigo-50/90 focus:outline-none"
               >
-                <div className="p-1.5 rounded-lg bg-indigo-50 border border-indigo-100/80 text-indigo-600 shrink-0 mt-0.5">
+                <div className="p-2 rounded-xl bg-indigo-50/90 border border-indigo-100 text-indigo-600 shrink-0 mt-0.5 shadow-sm">
                   <MapPin className="w-3.5 h-3.5" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="text-xs font-bold text-ink-900 truncate">{item.name}</div>
-                  <div className="text-[11px] text-ink-500 line-clamp-1">{item.display_name}</div>
-                  <div className="flex items-center gap-2 mt-1">
+                  <div className="text-xs font-bold text-ink-950 truncate">{item.name}</div>
+                  <div className="text-[11px] text-ink-600 line-clamp-1 mt-0.5">{item.display_name}</div>
+                  <div className="flex items-center gap-2 mt-1.5">
                     {item.district && (
-                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-slate-100 border border-slate-200/60 text-ink-600 font-medium">
+                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-slate-100/90 border border-slate-200/80 text-ink-700 font-semibold">
                         {item.district}
                       </span>
                     )}
-                    <span className="text-[9px] text-ink-400 font-mono">
+                    <span className="text-[9px] text-ink-400 font-mono font-medium">
                       {item.lat.toFixed(4)}, {item.lng.toFixed(4)}
                     </span>
                   </div>
@@ -411,7 +411,7 @@ export const PlaceSearchCombobox: React.FC<PlaceSearchComboboxProps> = ({
               </div>
             ))
           ) : (
-            <div className="p-3 text-center text-xs text-ink-500">
+            <div className="p-3.5 text-center text-xs text-ink-500 font-medium">
               {cleanTextState(value)}
             </div>
           )}

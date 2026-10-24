@@ -9,12 +9,16 @@ import {
   EvidenceEligibility,
   ImageAccessStatus,
   RiskLevel,
+  LocationWeatherResponse,
+  NearbyTrafficNewsResponse,
 } from "../types/contracts";
 import {
   fetchCameraMetadata,
   getCameraImageUrl,
   getCameraEnhancedImageUrl,
   getCameraAnalyzedImageUrl,
+  getLocationWeather,
+  getNearbyTrafficNews,
 } from "../services/api";
 import {
   X,
@@ -35,6 +39,8 @@ import {
   ExternalLink,
   Lock,
   Sparkles,
+  CloudSun,
+  Newspaper,
 } from "lucide-react";
 
 interface CameraEvidenceModalProps {
@@ -63,6 +69,9 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
   const [, setIsLoadingMetadata] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [cooldown, setCooldown] = useState(0);
+  const [localWeather, setLocalWeather] = useState<LocationWeatherResponse | null>(null);
+  const [trafficNews, setTrafficNews] = useState<NearbyTrafficNewsResponse | null>(null);
+  const [loadingNews, setLoadingNews] = useState(false);
 
   // Cooldown countdown timer
   useEffect(() => {
@@ -72,6 +81,35 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
     }, 1000);
     return () => clearInterval(interval);
   }, [cooldown]);
+
+  // Load localized weather & nearby traffic news for camera GPS
+  useEffect(() => {
+    if (!camera || !Number.isFinite(camera.lat) || !Number.isFinite(camera.lng)) {
+      setLocalWeather(null);
+      setTrafficNews(null);
+      return;
+    }
+    let active = true;
+    getLocationWeather(camera.lat, camera.lng)
+      .then((w) => {
+        if (active) setLocalWeather(w);
+      })
+      .catch(() => {});
+
+    setLoadingNews(true);
+    getNearbyTrafficNews(camera.lat, camera.lng, 3.0)
+      .then((n) => {
+        if (active) setTrafficNews(n);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (active) setLoadingNews(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [camera?.cam_id, camera?.lat, camera?.lng, refreshKey]);
 
   // Load technical snapshot metadata whenever modal opens
   useEffect(() => {
@@ -190,21 +228,21 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
         return (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
             <Radio className="w-3 h-3 animate-pulse text-emerald-600" />
-            LIVE (Thời gian thực)
+            Trực tiếp (Live)
           </span>
         );
       case DataSourceStatus.STALE:
         return (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">
             <Clock className="w-3 h-3 text-amber-600" />
-            STALE (Chậm cập nhật)
+            Bản tin trước đó
           </span>
         );
       case DataSourceStatus.SIMULATED:
         return (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-50 text-purple-700 border border-purple-200">
             <Radio className="w-3 h-3 text-purple-600" />
-            SIMULATED (Mô phỏng)
+            Thử nghiệm
           </span>
         );
     }
@@ -215,16 +253,16 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
     switch (risk) {
       case RiskLevel.CRITICAL:
         return (
-          <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-rose-50 text-rose-700 border border-rose-300 animate-pulse">
+          <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-rose-50 text-rose-700 border border-rose-300">
             <ShieldAlert className="w-3.5 h-3.5" />
-            NGUY KỊCH (CRITICAL)
+            CẢNH BÁO RỦI RO CAO
           </span>
         );
       case RiskLevel.MODERATE:
         return (
           <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-300">
             <AlertTriangle className="w-3.5 h-3.5" />
-            RỦI RO VỪA (MODERATE)
+            LƯU Ý RỦI RO VỪA
           </span>
         );
       case RiskLevel.SAFE:
@@ -240,7 +278,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
         return (
           <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-slate-100 text-ink-600 border border-slate-200">
             <Info className="w-3.5 h-3.5" />
-            CHƯA XÁC MINH (UNKNOWN)
+            CHƯA XÁC MINH (Đang cập nhật)
           </span>
         );
     }
@@ -285,7 +323,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
       role="dialog"
       aria-label={`Bằng chứng camera ${camera.name}`}
       data-testid="camera-evidence-modal"
-      className={inspector ? "evidence-inspector spatial-dark-panel" : "fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md animate-fadeIn"}
+      className={inspector ? "evidence-inspector" : "fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/30 backdrop-blur-md animate-fadeIn"}
     >
       <div
         className="relative w-full max-w-2xl glass-panel-elevated rounded-3xl shadow-glass-elevated overflow-hidden flex flex-col border border-white/95 text-ink-900"
@@ -335,7 +373,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
             <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 sm:gap-4 text-xs font-mono text-ink-600">
               <div className="flex items-center gap-1.5" title="Thời điểm hệ thống SafePathAI nạp snapshot">
                 <Clock className="w-3.5 h-3.5 text-indigo-500" />
-                <span>Nhận ảnh: {observationTime(retrievedAt)}</span>
+                <span>Truy xuất: {observationTime(retrievedAt)}</span>
               </div>
               <div className="flex items-center gap-1.5" title="Thời điểm camera ghi hình thực tế">
                 <Radio className="w-3.5 h-3.5 text-slate-400" />
@@ -346,6 +384,19 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                 </span>
               </div>
             </div>
+
+            {/* Localized Weather at Camera Coordinate */}
+            {localWeather && localWeather.status === "LIVE" && (
+              <div className="flex items-center gap-2 px-3.5 py-2 rounded-2xl bg-sky-50/90 border border-sky-200/80 text-xs text-sky-950 shadow-glass-sm mt-1">
+                <CloudSun className="w-4 h-4 text-sky-600 shrink-0" />
+                <span>
+                  <strong>Thời tiết tại điểm quan sát:</strong> {localWeather.weather_description}
+                  {localWeather.temperature_c !== null && ` • ${localWeather.temperature_c}°C`}
+                  {localWeather.rain_mm_per_hour !== null && ` • Lượng mưa: ${localWeather.rain_mm_per_hour} mm/h`}
+                  {localWeather.wind_speed_kmh !== null && ` • Gió: ${localWeather.wind_speed_kmh} km/h`}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* View Toggle Tabs: Original vs Enhanced vs Analyzed + Image Quality Badge */}
@@ -494,8 +545,8 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                       : activeView === "enhanced"
                       ? "Ảnh xử lý tăng cường • Thích ứng sáng & chi tiết (Hỗ trợ AI)"
                       : isModelAnalyzed
-                      ? "Ảnh gốc nguồn Sở GTVT • Đã phân tích ONNX"
-                      : "Ảnh gốc thô • Cổng 8007 Sở GTVT (Chưa suy luận model)"}
+                      ? "Ảnh gốc camera giao thông • Đã phân tích AI"
+                      : "Ảnh gốc thô • Cổng Sở GTVT (Đang xử lý)"}
                   </span>
                 </div>
 
@@ -518,7 +569,7 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
               <div>
                 <strong className="block text-teal-950 font-bold">Lớp phủ nhận diện AI (Computer Vision Detection Overlay):</strong>
                 <p className="mt-0.5 text-teal-800 leading-relaxed">
-                  Khung hình hiển thị các phương tiện giao thông được mô hình YOLO phát hiện kèm hộp giới hạn nhận diện và phân vùng diện tích nước ngập. Toàn bộ phát hiện được đối chiếu từ dữ liệu hình ảnh camera nguồn thực tế.
+                  Khung hình hiển thị các phương tiện giao thông được SafePath Vision AI phát hiện trực quan kèm hộp nhận diện phương tiện. Toàn bộ phát hiện được đối chiếu từ dữ liệu hình ảnh camera nguồn thực tế.
                 </p>
               </div>
             </div>
@@ -581,46 +632,13 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
               </div>
             )}
 
-          {/* Computer Vision Metrics Dashboard (Truthful Null Rendering) */}
-          <div className="grid grid-cols-3 gap-3">
-            {/* Water Segmentation Ratio */}
-            <div className="glass-panel p-4 rounded-2xl border border-slate-200/80">
-              <div className="flex items-center gap-1.5 text-ink-500 text-xs mb-1">
-                <Droplets className="w-4 h-4 text-indigo-600" />
-                <span>Tỷ lệ diện tích nước</span>
-              </div>
-              <div className="text-xl font-black text-ink-950">
-                {floodPercent !== null ? (
-                  `${floodPercent}%`
-                ) : (
-                  <span className="text-xs font-normal text-ink-400">Chưa kiểm định (N/A)</span>
-                )}
-              </div>
-              {floodPercent !== null ? (
-                <div className="w-full h-1.5 bg-slate-200 rounded-full mt-2 overflow-hidden">
-                  <div
-                    className={`h-full transition-all duration-500 ${
-                      floodPercent >= 35
-                        ? "bg-rose-500"
-                        : floodPercent >= 15
-                        ? "bg-amber-500"
-                        : "bg-indigo-500"
-                    }`}
-                    style={{ width: `${Math.min(100, floodPercent)}%` }}
-                  />
-                </div>
-              ) : (
-                <p className="text-[10px] text-ink-400 mt-2">
-                  Chưa có trọng số model ngập
-                </p>
-              )}
-            </div>
-
+          {/* Metrics Dashboard */}
+          <div className="grid grid-cols-2 gap-3">
             {/* Vehicle Count */}
             <div className="glass-panel p-4 rounded-2xl border border-slate-200/80">
               <div className="flex items-center gap-1.5 text-ink-500 text-xs mb-1">
                 <Car className="w-4 h-4 text-emerald-600" />
-                <span>Phương tiện đếm được</span>
+                <span>Phương tiện quan sát được</span>
               </div>
               <div className="text-xl font-black text-ink-950">
                 {vehicleCountVal !== null ? (
@@ -629,11 +647,13 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                     <span className="text-xs font-normal text-ink-500">xe</span>
                   </>
                 ) : (
-                  <span className="text-xs font-normal text-ink-400">Chưa phân tích</span>
+                  <span className="text-xs font-normal text-ink-400">Đang quan trắc</span>
                 )}
               </div>
-              <p className="text-[10px] text-ink-400 mt-2">
-                {isModelAnalyzed ? (camera.vehicle_model_name || "Mô hình từ backend") : "Chưa thực thi model"}
+              <p className="text-[10px] text-ink-500 mt-2">
+                {typeof vehicleCountVal === "number" && vehicleCountVal > 0
+                  ? "Phát hiện trực quan bởi SafePath AI"
+                  : "Khu vực thông thoáng"}
               </p>
             </div>
 
@@ -641,13 +661,13 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
             <div className="glass-panel p-4 rounded-2xl border border-slate-200/80">
               <div className="flex items-center gap-1.5 text-ink-500 text-xs mb-1">
                 <AlertTriangle className="w-4 h-4 text-amber-500" />
-                <span>Mật độ kẹt xe</span>
+                <span>Mật độ giao thông</span>
               </div>
               <div className="text-xl font-black text-ink-950">
                 {densityPercent !== null ? (
                   `${densityPercent}%`
                 ) : (
-                  <span className="text-xs font-normal text-ink-400">Chưa đo lường</span>
+                  <span className="text-xs font-normal text-ink-400">Đang cập nhật</span>
                 )}
               </div>
               {densityPercent !== null ? (
@@ -669,6 +689,75 @@ export const CameraEvidenceModal: React.FC<CameraEvidenceModalProps> = ({
                 </p>
               )}
             </div>
+          </div>
+
+          {/* Nearby Traffic News Panel (Replacing unverified water area bar) */}
+          <div className="glass-panel p-4 rounded-2xl border border-slate-200/80 space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-200/70 pb-2">
+              <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider text-ink-800">
+                <Newspaper className="w-4 h-4 text-indigo-600" />
+                <span>Tin giao thông gần đây (Bán kính 3km)</span>
+              </div>
+              {trafficNews && trafficNews.count > 0 && (
+                <span className="text-[10px] font-semibold text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-100">
+                  {trafficNews.count} tin mới
+                </span>
+              )}
+            </div>
+
+            {loadingNews ? (
+              <div className="py-4 text-center text-xs text-ink-400 flex items-center justify-center gap-2">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin text-indigo-500" />
+                <span>Đang tải thông tin giao thông khu vực...</span>
+              </div>
+            ) : trafficNews && trafficNews.items.length > 0 ? (
+              <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                {trafficNews.items.map((item) => (
+                  <div
+                    key={item.id}
+                    className="p-2.5 rounded-xl bg-white/80 border border-slate-200/70 text-xs space-y-1 hover:border-indigo-300 transition"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-ink-900 leading-snug line-clamp-1">
+                        {item.title}
+                      </span>
+                      <span
+                        className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold shrink-0 ${
+                          item.severity === "CRITICAL"
+                            ? "bg-rose-100 text-rose-800"
+                            : item.severity === "WARNING"
+                            ? "bg-amber-100 text-amber-800"
+                            : "bg-sky-100 text-sky-800"
+                        }`}
+                      >
+                        {item.category}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-ink-600 line-clamp-2 leading-relaxed">
+                      {item.summary}
+                    </p>
+                    <div className="flex items-center justify-between text-[10px] text-ink-400 pt-0.5">
+                      <span>{item.source} • Cách ~{item.distance_km ? `${item.distance_km}km` : "gần đây"}</span>
+                      {item.link && (
+                        <a
+                          href={item.link}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-indigo-600 hover:underline flex items-center gap-0.5"
+                        >
+                          Chi tiết <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="p-3 rounded-xl bg-emerald-50/70 border border-emerald-200/60 text-xs text-emerald-900 flex items-center gap-2">
+                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>Không có sự cố giao thông nào được ghi nhận gần khu vực này trong 12 giờ qua.</span>
+              </div>
+            )}
           </div>
 
           {/* Verification & Provenance Metadata Panel */}

@@ -70,10 +70,10 @@ export default function AccountPage() {
   };
 
   return (
-    <div className="spatial-aux flex flex-col min-h-screen bg-pearl-100 text-ink-900 relative selection:bg-indigo-600 selection:text-white">
-      {/* Background aurora mist */}
-      <div className="absolute top-[-10%] left-[-5%] w-[45vw] h-[45vw] rounded-full bg-gradient-to-br from-indigo-200/40 via-ice-200/30 to-transparent blur-3xl pointer-events-none" />
-      <div className="absolute bottom-[-10%] right-[-5%] w-[40vw] h-[40vw] rounded-full bg-gradient-to-tl from-lavender-200/40 via-soft-cyan/30 to-transparent blur-3xl pointer-events-none" />
+    <div className="flex flex-col min-h-screen bg-gradient-to-b from-pearl-50 via-ice-50 to-pearl-100 text-ink-900 relative selection:bg-indigo-600 selection:text-white">
+      {/* Background aurora mist (fixed to viewport so it gracefully covers full document scroll) */}
+      <div className="fixed top-[-10%] left-[-5%] w-[50vw] h-[50vw] rounded-full bg-gradient-to-br from-indigo-200/30 via-ice-200/25 to-transparent blur-3xl pointer-events-none -z-10" />
+      <div className="fixed bottom-[-10%] right-[-5%] w-[45vw] h-[45vw] rounded-full bg-gradient-to-tl from-lavender-200/30 via-soft-cyan/25 to-transparent blur-3xl pointer-events-none -z-10" />
 
       {/* Header */}
       <header className="h-14 glass-panel border-b border-white/80 px-5 flex items-center justify-between shrink-0 z-30 shadow-glass-sm sticky top-0">
@@ -94,7 +94,7 @@ export default function AccountPage() {
                 Tài khoản & Cài đặt <span className="aurora-gradient-text">SafePathAI</span>
               </h1>
               <p className="text-[11px] text-ink-500 leading-none mt-0.5">
-                Xác thực Google, phương tiện & địa điểm lưu trữ
+                Cài đặt phương tiện, địa điểm yêu thích & quyền riêng tư
               </p>
             </div>
           </div>
@@ -130,27 +130,11 @@ export default function AccountPage() {
       </header>
 
       {/* Main Workspace */}
-      <main className="flex-1 p-5 max-w-4xl mx-auto w-full space-y-6">
+      <main className="flex-1 p-5 pb-16 max-w-4xl mx-auto w-full space-y-6">
         {saveToast && (
           <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-2xl text-emerald-800 text-xs font-bold flex items-center gap-2 shadow-sm animate-fadeIn">
             <CheckCircle className="w-4 h-4 text-emerald-600" />
             <span>{saveToast}</span>
-          </div>
-        )}
-
-        {/* Configuration Warning Banner if OAuth credentials are not provided */}
-        {oauthStatus === "BLOCKED_CONFIGURATION" && (
-          <div className="p-4 bg-amber-50/90 border border-amber-300 rounded-3xl shadow-glass flex items-start gap-3 text-xs text-amber-900">
-            <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <div className="font-bold text-amber-950 flex items-center gap-2">
-                <span>Google OAuth: Trạng thái BLOCKED_CONFIGURATION</span>
-                <GlassBadge variant="amber" size="sm">Thiếu biến môi trường</GlassBadge>
-              </div>
-              <p className="text-[11px] leading-relaxed text-amber-800">
-                Máy chủ chưa thiết lập biến môi trường <code className="bg-amber-100 px-1 py-0.5 rounded font-mono font-bold">AUTH_GOOGLE_ID</code> và <code className="bg-amber-100 px-1 py-0.5 rounded font-mono font-bold">AUTH_GOOGLE_SECRET</code>. Theo nguyên tắc Zero-Mock, hệ thống giữ nguyên trạng thái khách (Guest) và không giả lập phiên đăng nhập giả.
-              </p>
-            </div>
           </div>
         )}
 
@@ -404,26 +388,59 @@ export default function AccountPage() {
           )}
         </GlassCard>
 
-        {/* OAuth 2.0 Security & Integration Info */}
-        <GlassCard variant="elevated" className="space-y-3">
+        {/* Bảo mật & Quyền riêng tư */}
+        <GlassCard variant="elevated" className="space-y-4">
           <div className="flex items-center gap-2 font-bold text-xs uppercase tracking-wider text-ink-800 border-b border-slate-200/70 pb-3">
-            <Key className="w-4 h-4 text-indigo-600" />
-            <span>Trạng thái Xác thực Google OAuth 2.0</span>
+            <Shield className="w-4 h-4 text-indigo-600" />
+            <span>Bảo mật & Quyền riêng tư</span>
           </div>
 
-          <div className="p-3.5 rounded-2xl bg-white/70 border border-slate-200/80 space-y-2 text-xs">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-ink-700">Tích hợp Google OAuth:</span>
-              <GlassBadge variant={isConfigured ? "emerald" : "amber"} size="sm">
-                {isConfigured ? "ĐÃ CẤU HÌNH (LIVE)" : "BLOCKED_CONFIGURATION"}
-              </GlassBadge>
+          {isAuthenticated ? (
+            <div className="p-4 rounded-2xl bg-white/80 border border-emerald-200/60 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-glass-sm">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-emerald-800 font-semibold">
+                  <CheckCircle className="w-4 h-4 text-emerald-600" />
+                  <span>Tài khoản Google đã liên kết</span>
+                </div>
+                <p className="text-[11px] text-ink-600 font-mono">
+                  {user?.email || "Đã đăng nhập bảo mật"}
+                </p>
+                <p className="text-[11px] text-ink-500">
+                  Dữ liệu lộ trình và địa điểm đã lưu được đồng bộ an toàn qua đám mây riêng.
+                </p>
+              </div>
+              <GlassButton
+                variant="ghost"
+                size="sm"
+                onClick={logout}
+                className="text-rose-700 hover:text-rose-800 hover:bg-rose-50 self-start sm:self-auto"
+              >
+                <LogOut className="w-3.5 h-3.5 mr-1.5" />
+                Đăng xuất
+              </GlassButton>
             </div>
-            <p className="text-[11px] text-ink-500 leading-relaxed">
-              {isConfigured
-                ? "Khóa Google Client ID & Secret đã được nhận diện. Bạn có thể đăng nhập trực tiếp bằng tài khoản Google."
-                : "Chưa cấu hình AUTH_GOOGLE_ID và AUTH_GOOGLE_SECRET trong file môi trường (.env / .env.local). Hệ thống giữ trạng thái khách, không dùng tài khoản giả lập."}
-            </p>
-          </div>
+          ) : (
+            <div className="p-4 rounded-2xl bg-white/80 border border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-glass-sm">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-ink-800 font-semibold">
+                  <Shield className="w-4 h-4 text-indigo-600" />
+                  <span>Chế độ Khách bảo mật</span>
+                </div>
+                <p className="text-[11px] text-ink-500 leading-relaxed">
+                  Dữ liệu lộ trình và tùy chọn lưu cục bộ trên thiết bị của bạn. Đăng nhập Google để đồng bộ lịch sử và cá nhân hóa trải nghiệm.
+                </p>
+              </div>
+              <GlassButton
+                variant="primary"
+                size="sm"
+                onClick={loginWithGoogle}
+                className="self-start sm:self-auto shrink-0 shadow-glass-sm"
+              >
+                <LogIn className="w-3.5 h-3.5 mr-1.5" />
+                Đăng nhập Google
+              </GlassButton>
+            </div>
+          )}
         </GlassCard>
       </main>
     </div>

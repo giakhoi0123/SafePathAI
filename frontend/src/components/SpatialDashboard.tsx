@@ -370,11 +370,11 @@ export default function SafePathDashboard() {
                   SafePath<span className="aurora-gradient-text font-black">AI</span>
                 </h1>
                 <span className="text-[10px] font-bold tracking-wider px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200/70 shadow-sm">
-                  2.0
+                  3.1
                 </span>
               </div>
               <p className="hidden xl:block text-[11px] text-ink-500 leading-none mt-0.5 font-medium">
-                Tuyến OSRM · Bằng chứng camera · Thời tiết
+                Định tuyến thông minh · Camera thực tế · Thời tiết
               </p>
             </div>
           </Link>
@@ -570,8 +570,8 @@ export default function SafePathDashboard() {
               />
 
               {/* Quick Presets Chips */}
-              <div className="pt-2 border-t border-slate-200/70">
-                <span className="text-[11px] text-ink-500 block mb-2 font-medium">
+              <div className="pt-2.5 border-t border-slate-200/80">
+                <span className="text-[11px] text-ink-700 block mb-2 font-bold uppercase tracking-wider">
                   Địa điểm gợi ý nhanh tại TP.HCM:
                 </span>
                 <div className="flex flex-wrap gap-1.5">
@@ -590,7 +590,7 @@ export default function SafePathDashboard() {
                           setUxState("READY_TO_ROUTE");
                         }
                       }}
-                      className="px-2.5 py-1 rounded-full bg-white/80 hover:bg-white border border-slate-200/80 text-[11px] font-medium text-ink-700 hover:text-indigo-600 shadow-glass-sm transition cursor-pointer"
+                      className="px-3 py-1.5 rounded-full bg-white/85 hover:bg-white border border-indigo-100 hover:border-indigo-300 text-[11px] font-semibold text-ink-800 hover:text-indigo-700 shadow-glass-sm hover:shadow-glass hover:-translate-y-0.5 active:scale-98 transition-all duration-200 cursor-pointer"
                     >
                       {p.name.split(" (")[0]}
                     </button>
@@ -603,7 +603,7 @@ export default function SafePathDashboard() {
                 type="button"
                 onClick={() => handleSearchRoute()}
                 disabled={isLoadingRoute || !origin || !destination}
-                className="aurora-btn-primary w-full mt-2 py-3 px-4 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-xs rounded-2xl flex items-center justify-center gap-2 cursor-pointer"
+                className="aurora-btn-primary w-full mt-3 py-3.5 px-4 disabled:opacity-40 disabled:cursor-not-allowed font-bold text-xs rounded-2xl flex items-center justify-center gap-2 cursor-pointer shadow-lg"
               >
                 {isLoadingRoute ? (
                   <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -686,27 +686,27 @@ export default function SafePathDashboard() {
 
               <div className="grid grid-cols-2 gap-2 text-xs">
                 {/* Weather Rainfall */}
-                <div className="bg-white/80 border border-slate-200/80 rounded-2xl p-2.5 space-y-1 shadow-glass-sm">
-                  <span className="text-[10px] text-ink-500 block font-medium">Lượng mưa (Open-Meteo)</span>
+                <div className="bg-gradient-to-br from-white/95 to-ice-50/70 border border-indigo-100/80 rounded-2xl p-3 space-y-1 shadow-glass-sm">
+                  <span className="text-[10px] text-ink-600 block font-bold uppercase tracking-wider">Lượng mưa (Open-Meteo)</span>
                   <div className="font-black text-sm text-ink-950">
                     {rain !== null ? (
                       rain === 0 ? (
-                        <span>0.0 mm/h <span className="text-[10px] font-normal text-emerald-600 block">(Không mưa)</span></span>
+                        <span>0.0 mm/h <span className="text-[10px] font-semibold text-emerald-600 block">(Không mưa)</span></span>
                       ) : (
-                        <span>{rain.toFixed(1)} mm/h <span className="text-[10px] font-normal text-blue-600 block">(Có mưa)</span></span>
+                        <span>{rain.toFixed(1)} mm/h <span className="text-[10px] font-semibold text-blue-600 block">(Có mưa)</span></span>
                       )
                     ) : (
                       "Chưa có dữ liệu"
                     )}
                   </div>
-                  <span className="text-[10px] text-ink-400 block font-medium">
-                    Trạng thái: <strong>{rain !== null ? "LIVE" : weatherTide?.rain_status === "LIVE" ? "STALE" : weatherTide?.rain_status || "UNAVAILABLE"}</strong>
+                  <span className="text-[10px] text-ink-500 block font-medium">
+                    Trạng thái: <strong className="text-ink-800">{rain !== null ? "Trực tiếp" : weatherTide?.rain_status === "LIVE" ? "Bản tin trước" : "Đang cập nhật"}</strong>
                   </span>
                 </div>
 
                 {/* Tide Water Level */}
-                <div className="bg-white/80 border border-slate-200/80 rounded-2xl p-2.5 space-y-1 shadow-glass-sm">
-                  <span className="text-[10px] text-ink-500 block font-medium flex items-center gap-1">
+                <div className="bg-gradient-to-br from-white/95 to-ice-50/70 border border-indigo-100/80 rounded-2xl p-3 space-y-1 shadow-glass-sm">
+                  <span className="text-[10px] text-ink-600 block font-bold uppercase tracking-wider flex items-center gap-1">
                     <Waves className="w-3 h-3 text-cyan-600" />
                     Thủy triều {weatherTide?.tide_station ? `(${weatherTide.tide_station})` : ""}
                   </span>
@@ -714,11 +714,11 @@ export default function SafePathDashboard() {
                     {tide !== null ? (
                       <span>{tide.toFixed(2)} m</span>
                     ) : (
-                      <span className="text-xs text-ink-500">Chưa có bản tin mới</span>
+                      <span className="text-xs text-ink-500 font-normal">Chưa có bản tin mới</span>
                     )}
                   </div>
-                  <span className="text-[10px] text-ink-400 block font-medium">
-                    Hệ mốc: <strong>Hòn Dấu</strong>
+                  <span className="text-[10px] text-ink-500 block font-medium">
+                    Hệ mốc: <strong className="text-ink-800">Hòn Dấu</strong>
                   </span>
                 </div>
               </div>
@@ -746,9 +746,8 @@ export default function SafePathDashboard() {
           }`}
         >
           <MapContainer
-            spatialDark
             pitch={pitch3D ? 60 : 0}
-            showFloodObservations={showFlood}
+            showFloodObservations={false}
             cameras={cameras}
             recommendedRoute={recommendedRoute}
             alternativeRoutes={alternativeRoutes}
@@ -770,7 +769,6 @@ export default function SafePathDashboard() {
       <nav className="spatial-dock liquid-pill" aria-label="Điều khiển không gian">
         <Link href="/" title="Tổng quan dữ liệu"><Home size={17}/><span>Khám phá</span></Link><i/>
         <button onClick={() => setPitch3D(!pitch3D)} aria-pressed={pitch3D}><Box size={17}/><span>{pitch3D ? "3D" : "2D"}</span></button>
-        <button onClick={() => setShowFlood(!showFlood)} aria-pressed={showFlood}><Layers size={17}/><span>Quan trắc nước</span></button><i/>
       </nav>
       {/* Camera Evidence Modal */}
       <CameraEvidenceModal

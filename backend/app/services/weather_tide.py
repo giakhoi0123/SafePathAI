@@ -13,6 +13,7 @@ import json
 import logging
 from typing import Optional
 import httpx
+from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
 from backend.app.core.config import settings
@@ -20,6 +21,44 @@ from backend.app.db.session import get_redis_client
 from backend.app.schemas.contracts import WeatherTideSignal
 
 logger = logging.getLogger(__name__)
+
+# WMO Weather interpretation table (Vietnamese localization)
+WMO_WEATHER_DESCRIPTIONS: dict[int, str] = {
+    0: "Trời quang đãng",
+    1: "Chủ yếu trời quang",
+    2: "Có mây rải rác",
+    3: "Nhiều mây, âm u",
+    45: "Sương mù",
+    48: "Sương mù đóng băng",
+    51: "Mưa phùn nhẹ",
+    53: "Mưa phùn vừa",
+    55: "Mưa phùn dày đặc",
+    61: "Mưa nhẹ",
+    63: "Mưa vừa",
+    65: "Mưa to",
+    80: "Mưa rào nhẹ",
+    81: "Mưa rào vừa",
+    82: "Mưa rào rất to",
+    95: "Dông sét nhẹ đến vừa",
+    96: "Dông kèm mưa đá nhỏ",
+    99: "Dông sét mạnh, nguy hiểm",
+}
+
+
+class LocationWeatherResponse(BaseModel):
+    lat: float
+    lng: float
+    temperature_c: Optional[float] = None
+    humidity_pct: Optional[int] = None
+    rain_mm_per_hour: Optional[float] = None
+    rain_probability_pct: Optional[int] = None
+    wind_speed_kmh: Optional[float] = None
+    weather_code: Optional[int] = None
+    weather_description: str = "Tạnh ráo"
+    observed_at: Optional[datetime] = None
+    freshness_seconds: Optional[int] = None
+    status: str = "LIVE"  # "LIVE" or "OBSERVATION_UNAVAILABLE"
+    source_url: str = settings.OPEN_METEO_URL
 
 # Redis cache keys
 REDIS_WEATHER_TIDE_KEY = "env:current_weather_tide"
@@ -141,6 +180,126 @@ async def fetch_hcm_weather(
     except Exception as exc:
         logger.warning("Failed to fetch Open-Meteo weather data: %s", exc)
         return (None, "WEATHER_UNAVAILABLE", None, None)
+    finally:
+        if close_client:
+            await client.aclose()
+        if close_redis and redis_client is not None:
+            await redis_client.aclose()
+
+
+async def fetch_location_weather(
+    lat: float,
+    lng: float,
+    client: Optional[httpx.AsyncClient] = None,
+    redis_client: Optional[Redis] = None,
+) -> LocationWeatherResponse:
+    """
+    Fetches real-time localized hydrometeorological signals for an exact GPS coordinate
+    (e.g., camera location or route point) via Open-Meteo.
+    Cached in Redis for 10 minutes by rounded coordinate.
+    """
+    lat_round = round(lat, 2)
+    lng_round = round(lng, 2)
+    loc_cache_key = f"env:weather:loc:{lat_round}:{lng_round}"
+
+    close_redis = False
+    if redis_client is None:
+        try:
+            redis_client = get_redis_client()
+            close_redis = True
+        except Exception:
+            redis_client = None
+
+    if redis_client is not None:
+        try:
+            cached_raw = await redis_client.get(loc_cache_key)
+            if cached_raw:
+                data = json.loads(cached_raw)
+                return LocationWeatherResponse.model_validate(data)
+        except Exception as exc:
+            logger.debug("Redis location weather read failed: %s", exc)
+
+    url = (
+        f"{settings.OPEN_METEO_URL}?latitude={lat}&longitude={lng}"
+        "&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m"
+        "&hourly=precipitation_probability&forecast_days=1&timezone=Asia%2FHo_Chi_Minh"
+    )
+
+    close_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=6.0)
+        close_client = True
+
+    now = datetime.now(timezone.utc)
+    try:
+        response = await client.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            current = data.get("current", {})
+            temp = current.get("temperature_2m")
+            humidity = current.get("relative_humidity_2m")
+            precip = current.get("rain") if current.get("rain") is not None else current.get("precipitation")
+            wcode = current.get("weather_code")
+            wind = current.get("wind_speed_10m")
+
+            hourly_prob = data.get("hourly", {}).get("precipitation_probability", [])
+            rain_prob = hourly_prob[0] if hourly_prob else None
+
+            desc = WMO_WEATHER_DESCRIPTIONS.get(wcode, "Nhiều mây" if (precip or 0) > 0 else "Tạnh ráo")
+
+            time_str = current.get("time")
+            observed_at = None
+            if time_str:
+                try:
+                    observed_at = datetime.fromisoformat(time_str)
+                    if observed_at.tzinfo is None:
+                        offset = data.get("utc_offset_seconds", 25200)
+                        observed_at = observed_at.replace(tzinfo=timezone(timedelta(seconds=offset)))
+                except ValueError:
+                    observed_at = now
+
+            freshness = int((now - (observed_at or now)).total_seconds())
+
+            res = LocationWeatherResponse(
+                lat=lat,
+                lng=lng,
+                temperature_c=float(temp) if temp is not None else None,
+                humidity_pct=int(humidity) if humidity is not None else None,
+                rain_mm_per_hour=float(precip) if precip is not None else 0.0,
+                rain_probability_pct=int(rain_prob) if rain_prob is not None else None,
+                wind_speed_kmh=float(wind) if wind is not None else None,
+                weather_code=int(wcode) if wcode is not None else None,
+                weather_description=desc,
+                observed_at=observed_at,
+                freshness_seconds=max(0, freshness),
+                status="LIVE",
+                source_url=settings.OPEN_METEO_URL,
+            )
+
+            if redis_client is not None:
+                try:
+                    await redis_client.set(loc_cache_key, res.model_dump_json(), ex=600)
+                except Exception as exc:
+                    logger.debug("Redis location weather write error: %s", exc)
+
+            return res
+        else:
+            return LocationWeatherResponse(
+                lat=lat,
+                lng=lng,
+                weather_description="Thời tiết tạm thời không khả dụng",
+                status="OBSERVATION_UNAVAILABLE",
+                source_url=settings.OPEN_METEO_URL,
+            )
+    except Exception as exc:
+        logger.warning("Failed to fetch location weather from Open-Meteo: %s", exc)
+        return LocationWeatherResponse(
+            lat=lat,
+            lng=lng,
+            weather_description="Thời tiết tạm thời không khả dụng",
+            status="OBSERVATION_UNAVAILABLE",
+            source_url=settings.OPEN_METEO_URL,
+        )
     finally:
         if close_client:
             await client.aclose()

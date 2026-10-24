@@ -270,3 +270,44 @@ export interface ModelDeploymentStatus {
   provenance_status?: string | null;
   deployment_validation?: string | null;
 }
+
+export interface LocationWeatherResponse {
+  lat: number;
+  lng: number;
+  temperature_c?: number | null;
+  humidity_pct?: number | null;
+  rain_mm_per_hour?: number | null;
+  rain_probability_pct?: number | null;
+  wind_speed_kmh?: number | null;
+  weather_code?: number | null;
+  weather_description: string;
+  observed_at?: string | null;
+  freshness_seconds?: number | null;
+  status: string;
+  source_url: string;
+}
+
+export interface TrafficNewsItem {
+  id: string;
+  title: string;
+  summary: string;
+  source: string;
+  category: string;
+  severity: string;
+  published_at: string;
+  lat?: number | null;
+  lng?: number | null;
+  distance_km?: number | null;
+  link?: string | null;
+}
+
+export interface NearbyTrafficNewsResponse {
+  lat: number;
+  lng: number;
+  radius_km: number;
+  count: number;
+  items: TrafficNewsItem[];
+  status: string;
+  message: string;
+  fetched_at: string;
+}

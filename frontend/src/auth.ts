@@ -3,6 +3,11 @@ import GoogleProvider from "next-auth/providers/google";
 
 const googleClientId = process.env.AUTH_GOOGLE_ID || process.env.GOOGLE_CLIENT_ID || "";
 const googleClientSecret = process.env.AUTH_GOOGLE_SECRET || process.env.GOOGLE_CLIENT_SECRET || "";
+const authSecret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
+
+if (!authSecret && process.env.NODE_ENV === "production") {
+  throw new Error("AUTH_SECRET or NEXTAUTH_SECRET environment variable is strictly required in production.");
+}
 
 export const authOptions: NextAuthOptions = {
   providers: [
@@ -11,7 +16,7 @@ export const authOptions: NextAuthOptions = {
       clientSecret: googleClientSecret,
     }),
   ],
-  secret: process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET || "safepath-jwt-secret-signing-key-production-recovery-2026",
+  secret: authSecret,
   session: {
     strategy: "jwt",
     maxAge: 30 * 24 * 60 * 60, // 30 days

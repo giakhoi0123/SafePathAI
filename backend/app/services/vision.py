@@ -549,7 +549,7 @@ class VehicleDetector:
     def detect_vehicles(
         self,
         prep: Union[PreprocessResult, np.ndarray],
-        conf_threshold: float = 0.25,
+        conf_threshold: float = 0.20,
         nms_threshold: float = 0.45,
     ) -> VehicleDetectionResult:
         """
@@ -703,13 +703,58 @@ class VehicleDetector:
     def _detect_onnx(
         self,
         prep: PreprocessResult,
-        conf_threshold: float = 0.25,
+        conf_threshold: float = 0.20,
         nms_threshold: float = 0.45,
     ) -> VehicleDetectionResult:
-        """Performs true ONNX forward pass, box decoding, and NMS on the original image."""
+        """Performs true ONNX forward pass, box decoding, and NMS on the original image with multi-scale tiling."""
+        img = prep.original_image
+        h, w = prep.height, prep.width
+
+        # 1. Base full-frame detections
         detected_vehicles = self._detect_onnx_frame(
-            prep.original_image, prep.height, prep.width, conf_threshold, nms_threshold
+            img, h, w, conf_threshold, nms_threshold
         )
+
+        # 2. Adaptive 2x2 tiling for low-resolution camera frames (e.g. 306x236 HCMC traffic cams)
+        if h <= 320 and w <= 420 and h >= 100 and w >= 100:
+            h_half = h // 2
+            w_half = w // 2
+            overlap_h = int(h_half * 0.15)
+            overlap_w = int(w_half * 0.15)
+
+            tile_coords = [
+                (0, min(h, h_half + overlap_h), 0, min(w, w_half + overlap_w)),
+                (0, min(h, h_half + overlap_h), max(0, w_half - overlap_w), w),
+                (max(0, h_half - overlap_h), h, 0, min(w, w_half + overlap_w)),
+                (max(0, h_half - overlap_h), h, max(0, w_half - overlap_w), w),
+            ]
+
+            tile_vehicles: List[DetectedVehicle] = []
+            for y1, y2, x1, x2 in tile_coords:
+                tile = img[y1:y2, x1:x2]
+                dets = self._detect_onnx_frame(
+                    tile, y2 - y1, x2 - x1, conf_threshold, nms_threshold
+                )
+                for d in dets:
+                    bx1, by1, bx2, by2 = d.bbox
+                    remapped_box = (bx1 + x1, by1 + y1, bx2 + x1, by2 + y1)
+                    tile_vehicles.append(
+                        DetectedVehicle(
+                            cls_name=d.cls_name,
+                            confidence=d.confidence,
+                            bbox=remapped_box,
+                            weight=d.weight,
+                        )
+                    )
+
+            if tile_vehicles:
+                all_v = list(detected_vehicles) + tile_vehicles
+                boxes = [[v.bbox[0], v.bbox[1], v.bbox[2] - v.bbox[0], v.bbox[3] - v.bbox[1]] for v in all_v]
+                confs = [v.confidence for v in all_v]
+                indices = cv2.dnn.NMSBoxes(boxes, confs, conf_threshold, nms_threshold)
+                if len(indices) > 0:
+                    detected_vehicles = [all_v[i] for i in indices.flatten()]
+
         total_weight = sum(v.weight for v in detected_vehicles)
         density_score = min(1.0, max(0.0, round(total_weight / DENSITY_SATURATION_WEIGHT, 3)))
 
