@@ -18,6 +18,7 @@ import httpx
 from PIL import Image
 
 from backend.app.core.config import settings
+from backend.app.db.session import get_redis_client
 from backend.app.schemas.contracts import DataSourceStatus, WeatherTideSignal
 from backend.app.services.scraper import (
     build_camera_image_url,
@@ -28,6 +29,7 @@ from backend.app.services.scraper import (
     MIN_VALID_IMAGE_BYTES,
 )
 from backend.app.services.weather_tide import (
+    REDIS_TIDE_BULLETIN_KEY,
     fetch_hcm_weather,
     fetch_tide_signal,
     get_combined_weather_tide,
@@ -313,10 +315,15 @@ class TestWeatherTideIngestion:
     @pytest.mark.asyncio
     async def test_fetch_tide_signal_unavailable_without_bulletin(self):
         # Normal tide without bulletin: TIDE_UNAVAILABLE, None
-        normal_signal = await fetch_tide_signal()
-        assert normal_signal.tide_status == "TIDE_UNAVAILABLE"
-        assert normal_signal.tide_level_meters is None
-        assert normal_signal.timestamp is None
+        redis = get_redis_client()
+        await redis.delete(REDIS_TIDE_BULLETIN_KEY)
+        try:
+            normal_signal = await fetch_tide_signal(redis_client=redis)
+            assert normal_signal.tide_status == "TIDE_UNAVAILABLE"
+            assert normal_signal.tide_level_meters is None
+            assert normal_signal.timestamp is None
+        finally:
+            await redis.aclose()
 
     @pytest.mark.asyncio
     async def test_redis_sync_and_retrieve(self):

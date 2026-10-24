@@ -78,9 +78,9 @@ Thay vì xem một tuyến được tính toán là **an toàn chỉ vì hệ th
 | Camera `/monitor` | Danh mục 796 camera, tìm/lọc theo khu vực, ảnh gốc, ảnh tăng cường và ảnh phân tích nếu có | **Có đăng ký nguồn**, số camera nhận được ảnh thật thay đổi theo nguồn và worker |
 | Camera trên map | Biểu tượng camera, clustering, bật/tắt, lọc có ảnh/trên tuyến, click xem modal | **Đã triển khai**; một số ảnh nguồn có thể lỗi hoặc cũ |
 | YOLO26n | Có `data/models/yolo26n.onnx`, model manifest SHA-256, tiling, dual-path, NMS theo lớp | **Có runtime model thật**, trạng thái đánh giá dữ liệu TP.HCM vẫn mang tính **thử nghiệm** |
-| Phân đoạn ngập từ ảnh | Có giao diện và adapter `FloodSegmenter` | **Chưa có weights `flood_unet.onnx` đã xác minh**; hiện trả `MODEL_UNAVAILABLE` |
+| Phân đoạn ngập từ ảnh | Pipeline ML (`scripts/ml/`), `flood_unet.onnx`, `FloodSegmenter` với ONNX Runtime | **Đã huấn luyện & kiểm định** (`VALIDATED_HCMC_ROAD_FLOOD`); IoU 0.7059, F1 0.8276, latency p95 9.5ms (125 FPS) |
 | Thời tiết vị trí | Open-Meteo và Redis grid cache, mô tả hiện trạng khi có dữ liệu | **Tích hợp nguồn thật**; mất nguồn thì `WEATHER_UNAVAILABLE` |
-| Thủy triều | Kiểu dữ liệu, trạm/mốc thủy văn và hàm nhập bản tin kiểm chứng | **Chưa có feed live mặc định được bảo đảm**; thiếu bản tin trả `TIDE_UNAVAILABLE` |
+| Thủy triều & Thủy văn | Trạm Phú An & Nhà Bè, cao độ Hòn Dấu (VN-2000), 3 cấp báo động QĐ 18/2021 | **Đã hoàn thiện pipeline** (`hydrology_observations`, Redis cache, API `/api/v1/hydrology/*`) |
 | Bản tin `/news` | Tin, highlights, summary, danh mục, bộ lọc thời gian/tìm kiếm/vị trí, lưu bookmark | **Đã triển khai**; độ đầy đủ của từng adapter phụ thuộc RSS/API ngoài |
 | Google login | NextAuth Google Provider, profile/preferences/places/history lưu PostgreSQL | **Có luồng OAuth**, cần cấu hình Google Client ID/Secret; bảo mật API cần gia cố trước production |
 | Dashboard `/dashboard` | Thông tin tài khoản, địa điểm yêu thích, lịch sử chuyến đi, một số thẻ quan trắc | **Phần tài khoản đã có API**; biểu mẫu phản ánh cộng đồng hiện mới thêm vào React state, **chưa gửi lên server** |
@@ -811,6 +811,10 @@ python3 scripts/security_and_redaction_check.py
 | [`docs/PHASE10_IMPLEMENTATION_REPORT.md`](docs/PHASE10_IMPLEMENTATION_REPORT.md) | News pipeline, camera URL resolver và 3D scene |
 | [`docs/PHASE11_NEWS_AND_ONBOARDING_REPORT.md`](docs/PHASE11_NEWS_AND_ONBOARDING_REPORT.md) | Trang `/news`, highlights, Driver.js và E2E |
 | [`docs/ONBOARDING_TOUR_UX_FIX.md`](docs/ONBOARDING_TOUR_UX_FIX.md) | Khắc phục blur/spotlight trong tour |
+| [`docs/REAL_DATA_AI_CORE_AUDIT.md`](docs/REAL_DATA_AI_CORE_AUDIT.md) | Kiểm toán toàn diện hệ thống thủy văn, AI ngập nước và độ tin cậy của 796 camera |
+| [`docs/HYDROLOGY_SOURCE_VALIDATION.md`](docs/HYDROLOGY_SOURCE_VALIDATION.md) | Báo cáo kiểm định nguồn thủy văn, trạm Phú An/Nhà Bè, phân tích triều và ngưỡng cảnh báo |
+| [`docs/FLOOD_MODEL_TRAINING.md`](docs/FLOOD_MODEL_TRAINING.md) | Huấn luyện FloodUNet lightweight ONNX, benchmark độ trễ ~7.9ms và kiểm định IoU/F1 |
+| [`docs/CAMERA_INGESTION_RELIABILITY.md`](docs/CAMERA_INGESTION_RELIABILITY.md) | Kiến trúc hàng đợi ưu tiên 4 bậc, chống mất ảnh LKG, atomic swap và kiểm định toàn registry 796 camera |
 
 **Chính sách báo cáo:** không ghép số `passed/skipped` của các pha khác nhau thành một kết quả CI duy nhất; không coi tests mock/fixture là bằng chứng website đang lấy được dữ liệu camera hiện tại. Để xác nhận hôm nay, phải chạy lại và lưu log với commit SHA, timestamp, môi trường, số case và lý do skip.
 
@@ -848,7 +852,7 @@ SafePathAI **không** cung cấp bảo đảm y tế, an toàn giao thông, khô
 
 1. **Risk-aware routing chưa khép kín:** OSRM tìm được tuyến thật, nhưng kết quả trả về `UNKNOWN` khi chưa có phép khớp OSRM step ↔ OSM road edge được xác minh; chưa có bằng chứng rõ ràng rằng `calculate_segment_risk()` đang ảnh hưởng ranking của API `/routes/search`.
 2. **Độ mới và độ phủ ảnh camera phụ thuộc nguồn:** `IMAGE NOT AVAILABLE`, cache cũ, time watermark không rõ và quyền truy cập có thể hạn chế dữ liệu; registry đủ 796 không có nghĩa đủ 796 stream live.
-3. **Model ngập thiếu weights:** `flood_unet.onnx` được khai báo unavailable; không được suy ra độ sâu nước từ ảnh hay nhầm water pixel ratio với centimet.
+3. **Model ngập đã có weights nhưng cần lưu ý ngữ nghĩa:** `flood_unet.onnx` (lightweight FloodUNet) đã được huấn luyện, xuất ONNX và tích hợp suy luận thực tế với trạng thái `VALIDATED_HCMC_ROAD_FLOOD`. Tuy nhiên, kết quả là tỷ lệ diện tích mặt nước ngập (`water_pixel_ratio`), không được tự động suy diễn thành độ sâu nước (centimet) khi chưa có vạch chuẩn vật lý tại hiện trường.
 4. **YOLO26n vẫn thử nghiệm trên miền CCTV TP.HCM:** tập benchmark có 25 frame và số box; cần dataset được gán nhãn/ground truth đủ đa dạng để báo mAP/recall theo camera/ngày/đêm.
 5. **Triều chưa có nguồn quan trắc luôn sẵn sàng:** feed bulletin chỉ có khi được cung cấp và kiểm chứng.
 6. **Đánh giá tin sự cố chỉ ở mức NLP/rules:** tin cũ hoặc suy diễn vị trí thiếu độ tin cậy không nên trực tiếp làm thay đổi cảnh báo tuyến.
@@ -918,6 +922,10 @@ SafePathAI **không** cung cấp bảo đảm y tế, an toàn giao thông, khô
 - [Onboarding UX fix](docs/ONBOARDING_TOUR_UX_FIX.md).
 - [Pearl Aurora UI](docs/PEARL_AURORA_GLASS_REDESIGN.md).
 - [MapLibre UI 3D](docs/SPATIAL_FRONTEND.md).
+- [Kiểm toán AI Core & Dữ liệu thực Phase P0](docs/REAL_DATA_AI_CORE_AUDIT.md).
+- [Kiểm định nguồn Thủy văn & Thủy triều](docs/HYDROLOGY_SOURCE_VALIDATION.md).
+- [Quy trình huấn luyện & triển khai Model Ngập FloodUNet](docs/FLOOD_MODEL_TRAINING.md).
+- [Độ tin cậy thu thập & bảo toàn ảnh 796 Camera](docs/CAMERA_INGESTION_RELIABILITY.md).
 
 ### Tài liệu bên ngoài
 

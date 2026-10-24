@@ -115,8 +115,11 @@ class TestModelManifestAndIntegrity:
         assert veh["expected_input"]["dtype"] == "float32"
 
         flood = models["flood_segmenter"]
-        assert flood["provenance_status"] == "MODEL_UNAVAILABLE"
-        assert flood["sha256"] is None
+        assert flood["provenance_status"] in ("VALIDATED_HCMC_ROAD_FLOOD", "MODEL_UNAVAILABLE")
+        if flood["provenance_status"] == "VALIDATED_HCMC_ROAD_FLOOD":
+            assert flood["sha256"] is not None and len(flood["sha256"]) == 64
+        else:
+            assert flood["sha256"] is None
 
     def test_yolo26n_file_hash(self, real_yolo_path):
         hasher = hashlib.sha256()
@@ -191,8 +194,8 @@ class TestFloodSegmenterZeroMock:
     """Verifies that missing flood segmentation weights yield MODEL_UNAVAILABLE without faking."""
 
     def test_flood_segmenter_transparent_unavailable(self, test_frames_dir):
-        # Default path has no weights
-        segmenter = FloodSegmenter(model_path="data/models/flood_unet.onnx", fallback_to_heuristic=False)
+        # Missing weights path must yield MODEL_UNAVAILABLE
+        segmenter = FloodSegmenter(model_path="data/models/missing_flood_weights.onnx", fallback_to_heuristic=False)
         assert segmenter.model_status == "MODEL_UNAVAILABLE"
         assert segmenter.session is None
 

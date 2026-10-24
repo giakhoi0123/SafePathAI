@@ -355,6 +355,7 @@ async def ingest_verified_tide_bulletin(
 async def fetch_tide_signal(
     now: Optional[datetime] = None,
     redis_client: Optional[Redis] = None,
+    check_db: bool = False,
 ) -> WeatherTideSignal:
     """
     Retrieves the current tidal observation for HCMC stations.
@@ -396,6 +397,36 @@ async def fetch_tide_signal(
         finally:
             if close_redis:
                 await redis_client.aclose()
+
+    # Optional database fallback
+    if check_db:
+        try:
+            from backend.app.db.session import AsyncSessionLocal
+            from backend.app.db.models import HydrologyObservation
+            from sqlalchemy import select, desc
+            async with AsyncSessionLocal() as session:
+                stmt = select(HydrologyObservation).order_by(desc(HydrologyObservation.observed_at)).limit(1)
+                res = await session.execute(stmt)
+                obs = res.scalar_one_or_none()
+                if obs is not None:
+                    diff_sec = (now - obs.observed_at).total_seconds()
+                    status = "LIVE" if 0 <= diff_sec <= TIDE_BULLETIN_TTL_SECONDS else "STALE"
+                    is_alert = (obs.water_level_m >= HIGH_TIDE_ALERT_THRESHOLD_METERS) if status == "LIVE" else None
+                    return WeatherTideSignal(
+                        rain_mm_per_hour=None,
+                        rain_status="WEATHER_UNAVAILABLE",
+                        tide_level_meters=obs.water_level_m,
+                        tide_status=status,
+                        tide_observed_at=obs.observed_at,
+                        tide_source_url=obs.source_url,
+                        tide_station=f"{obs.station_name} ({obs.river_name})",
+                        tide_datum=obs.vertical_datum,
+                        is_high_tide_alert=is_alert,
+                        timestamp=obs.observed_at,
+                        source_url=obs.source_url,
+                    )
+        except Exception as exc:
+            logger.debug("Database fallback for tide signal check failed: %s", exc)
 
     # No verified bulletin available
     return WeatherTideSignal(

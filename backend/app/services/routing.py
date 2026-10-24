@@ -443,6 +443,11 @@ async def _batched_spatial_context(
     cached: dict[str, CameraEvidence] = {}
     if unique_ids and redis_client is not None:
         try:
+            from backend.app.services.camera_scheduler import camera_scheduler
+            await camera_scheduler.register_active_route_cameras(redis_client, unique_ids, ttl_seconds=900)
+        except Exception as exc:
+            logger.debug("Failed registering corridor cameras to priority queue: %s", exc)
+        try:
             values = await redis_client.mget([f"camera_evidence:{cam_id}" for cam_id in unique_ids])
             for cam_id, raw in zip(unique_ids, values):
                 if raw:

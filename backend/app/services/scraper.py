@@ -15,6 +15,7 @@ import random
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 import httpx
 
 from backend.app.core.config import settings
@@ -72,6 +73,11 @@ class CircuitBreaker:
         self.consecutive_failures = 0
         self.state = "CLOSED"
 
+    def reset(self):
+        self.consecutive_failures = 0
+        self.last_failure_time = 0.0
+        self.state = "CLOSED"
+
     def can_request(self) -> bool:
         if self.state == "CLOSED":
             return True
@@ -80,19 +86,44 @@ class CircuitBreaker:
             return True
         return False
 
+    def allow_request(self) -> bool:
+        return self.can_request()
+
 
 # Global circuit breaker instance for HCMC traffic portal
 portal_circuit_breaker = CircuitBreaker()
 
 
-def evict_stale_disk_images(storage_dir: str = "storage/cams", max_hours: int = 24) -> int:
-    """Removes cached snapshot files older than max_hours to control disk usage."""
+def evict_stale_disk_images(
+    storage_dir: str = "storage/cams",
+    max_hours: int = 24,
+    preserve_last_good: bool = True,
+) -> int:
+    """
+    Cleans temporary swap files and obsolete snapshots while strictly preserving
+    the Last Known Good snapshot for every registered camera.
+    """
     if not os.path.exists(storage_dir):
         return 0
     now = time.time()
     cutoff = now - (max_hours * 3600)
     evicted = 0
     for fname in os.listdir(storage_dir):
+        # Always clean temporary files (.tmp) older than 1 hour
+        if fname.endswith(".tmp"):
+            fpath = os.path.join(storage_dir, fname)
+            try:
+                if os.path.isfile(fpath) and os.path.getmtime(fpath) < (now - 3600):
+                    os.remove(fpath)
+                    evicted += 1
+            except Exception as e:
+                logger.debug("Failed cleaning tmp file %s: %s", fpath, e)
+            continue
+
+        # Zero-Mock Rule: Never evict the primary snapshot of any camera if preserve_last_good is enabled
+        if preserve_last_good:
+            continue
+
         if fname.endswith(".jpg") or fname.endswith(".png"):
             fpath = os.path.join(storage_dir, fname)
             try:
@@ -412,9 +443,21 @@ async def scrape_camera_image(
                 previous_dhash=previous_dhash,
             )
             if val_result.is_valid:
-                # Valid frame! Save to disk atomically
-                with open(local_image_path, "wb") as f:
-                    f.write(res.image_bytes)
+                # Valid frame! Save to disk atomically via temporary swap file
+                tmp_image_path = f"{local_image_path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+                try:
+                    with open(tmp_image_path, "wb") as f:
+                        f.write(res.image_bytes)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp_image_path, local_image_path)
+                except Exception as write_err:
+                    logger.warning("Failed atomic write for %s: %s", cam_id, write_err)
+                    if os.path.exists(tmp_image_path):
+                        try:
+                            os.remove(tmp_image_path)
+                        except Exception:
+                            pass
 
                 etag_val = val_result.md5_hash or res.content_hash
 

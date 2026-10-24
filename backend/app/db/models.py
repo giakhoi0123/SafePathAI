@@ -339,6 +339,35 @@ class TrafficNewsArticle(Base):
     )
 
 
+class HydrologyObservation(Base):
+    """
+    Real-time and forecasted water level / tidal observations for HCMC monitoring stations.
+    Stations include Trạm Phú An (Sông Sài Gòn) and Trạm Nhà Bè (Sông Đồng Điền / Nhà Bè).
+    Grounds water levels in meters relative to official vertical datum (Hòn Dấu / VN-2000).
+    """
+    __tablename__ = "hydrology_observations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    station_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    station_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    river_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    district: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    water_level_m: Mapped[float] = mapped_column(Float, nullable=False)
+    alarm_level: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    vertical_datum: Mapped[str] = mapped_column(String(64), default="Hòn Dấu (VN-2000)", nullable=False)
+    measurement_type: Mapped[str] = mapped_column(String(32), default="TIDAL_OBSERVATION", nullable=False)
+    observed_at: Mapped[Any] = mapped_column(DateTime(timezone=True), index=True, nullable=False)
+    quality_status: Mapped[str] = mapped_column(String(32), default="OBSERVED_LIVE", index=True, nullable=False)
+    source_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<HydrologyObservation({self.station_id}, {self.water_level_m}m, alarm={self.alarm_level}, status={self.quality_status})>"
+
+
 # PostGIS Spatial CTE Query for finding the nearest road segment within a given radius in meters
 MAP_CAMERAS_POSTGIS_SQL = text("""
     WITH ranked_roads AS (

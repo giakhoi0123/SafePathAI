@@ -14,6 +14,7 @@ import os
 import uuid
 from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 import cv2
+from pydantic import BaseModel, Field
 from fastapi import (
     Depends,
     FastAPI,
@@ -104,6 +105,12 @@ from backend.app.services.weather_tide import (
     get_cached_weather_tide,
     get_combined_weather_tide,
     sync_weather_tide_to_redis,
+)
+from backend.app.services.hydrology_service import (
+    hydrology_service,
+    HydrologyStationMetadata,
+    HydrologyLatestResponse,
+    HydrologyObservationDTO,
 )
 from backend.app.services.traffic_news import (
     NearbyTrafficNewsResponse,
@@ -593,6 +600,94 @@ async def get_location_weather(
             await redis.aclose()
 
 
+# ==============================================================================
+# Hydrology & Tidal Monitoring Endpoints (HCMC Stations)
+# ==============================================================================
+
+@app.get(
+    "/api/v1/hydrology/stations",
+    response_model=List[HydrologyStationMetadata],
+    summary="List all registered HCMC hydrological observation stations",
+    tags=["Hydrology"],
+)
+async def get_hydrology_stations() -> List[HydrologyStationMetadata]:
+    """
+    Returns metadata for all verified HCMC hydrological monitoring stations:
+    Trạm Phú An (Sài Gòn River) and Trạm Nhà Bè (Đồng Điền / Nhà Bè River),
+    including official coordinates, datum, and Decision 18/2021 alarm thresholds.
+    """
+    return hydrology_service.get_registered_stations()
+
+
+@app.get(
+    "/api/v1/hydrology/latest",
+    response_model=HydrologyLatestResponse,
+    summary="Get latest verified water levels and tidal alarm status for HCMC stations",
+    tags=["Hydrology"],
+)
+async def get_latest_hydrology(
+    session: AsyncSession = Depends(get_db),
+) -> HydrologyLatestResponse:
+    """
+    Returns the latest verified observations across all HCMC stations with alarm levels:
+    - Báo động I: 1.40m
+    - Báo động II: 1.50m
+    - Báo động III: 1.60m
+    Quality status indicates OBSERVED_LIVE, OBSERVED_STALE, FORECAST, or UNAVAILABLE.
+    """
+    redis = get_redis_client()
+    try:
+        return await hydrology_service.get_latest_observations(session, redis)
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
+@app.get(
+    "/api/v1/hydrology/history",
+    response_model=List[HydrologyObservationDTO],
+    summary="Get historical hydrology observations for a specific station",
+    tags=["Hydrology"],
+)
+async def get_hydrology_history(
+    station_id: str = Query(..., description="Station ID, e.g. tram_phu_an or tram_nha_be"),
+    limit: int = Query(24, ge=1, le=168, description="Maximum number of historical observations"),
+    session: AsyncSession = Depends(get_db),
+) -> List[HydrologyObservationDTO]:
+    """
+    Returns historical water level records for the specified station in chronological order.
+    """
+    return await hydrology_service.get_station_history(session, station_id=station_id, limit=limit)
+
+
+class IngestHydrologyRequest(BaseModel):
+    bulletin_text: Optional[str] = Field(None, description="Raw text of hydrographic bulletin in Vietnamese")
+
+
+@app.post(
+    "/api/v1/hydrology/ingest",
+    response_model=List[HydrologyObservationDTO],
+    summary="Ingest hydrological bulletin or trigger external observation fetch",
+    tags=["Hydrology"],
+)
+async def trigger_hydrology_ingestion(
+    payload: Optional[IngestHydrologyRequest] = None,
+    session: AsyncSession = Depends(get_db),
+) -> List[HydrologyObservationDTO]:
+    """
+    Parses and ingests hydrographic bulletin text or triggers external observation fetch,
+    updating PostgreSQL and Redis caches.
+    """
+    redis = get_redis_client()
+    bulletin_text = payload.bulletin_text if payload else None
+    try:
+        records = await hydrology_service.run_ingestion_cycle(session, redis, bulletin_text=bulletin_text)
+        return [hydrology_service._model_to_dto(r) for r in records]
+    finally:
+        if redis is not None:
+            await redis.aclose()
+
+
 @app.get(
     "/api/v1/traffic-news/nearby",
     response_model=NearbyTrafficNewsResponse,
@@ -694,6 +789,11 @@ async def get_all_traffic_news(
 @app.get(
     "/api/v1/admin/camera-ingestion/status",
     summary="Get camera ingestion health and scheduler metrics",
+    tags=["Surveillance"],
+)
+@app.get(
+    "/api/v1/admin/cameras/metrics",
+    summary="Get camera ingestion health and scheduler metrics (alias)",
     tags=["Surveillance"],
 )
 async def get_camera_ingestion_status(

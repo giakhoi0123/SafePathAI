@@ -63,22 +63,27 @@ class CameraScheduler:
             await redis.zremrangebyscore("active_viewed_cameras_zset", "-inf", now_ts)
             await redis.zremrangebyscore("active_route_cameras_zset", "-inf", now_ts)
 
-            # Retrieve active from zset
+            # Retrieve active from authoritative time-scored zsets
             z_viewed_raw = await redis.zrange("active_viewed_cameras_zset", 0, -1)
             z_route_raw = await redis.zrange("active_route_cameras_zset", 0, -1)
 
-            # Also check simple sets for backwards compatibility
-            s_viewed_raw = await redis.smembers("active_viewed_cameras")
-            s_route_raw = await redis.smembers("active_route_cameras")
-
             viewed = {
                 (x if isinstance(x, str) else x.decode("utf-8"))
-                for x in (list(z_viewed_raw) + list(s_viewed_raw))
+                for x in z_viewed_raw
             }
             route = {
                 (x if isinstance(x, str) else x.decode("utf-8"))
-                for x in (list(z_route_raw) + list(s_route_raw))
+                for x in z_route_raw
             }
+
+            # If zsets are completely empty, check fallback simple sets
+            if not viewed:
+                s_viewed_raw = await redis.smembers("active_viewed_cameras")
+                viewed = {(x if isinstance(x, str) else x.decode("utf-8")) for x in s_viewed_raw}
+            if not route:
+                s_route_raw = await redis.smembers("active_route_cameras")
+                route = {(x if isinstance(x, str) else x.decode("utf-8")) for x in s_route_raw}
+
             return viewed, route
         except Exception as exc:
             logger.debug("Failed to read priority sets from Redis: %s", exc)
@@ -100,6 +105,7 @@ class CameraScheduler:
             if mapping:
                 await redis.zadd("active_viewed_cameras_zset", mapping)
                 await redis.sadd("active_viewed_cameras", *mapping.keys())
+                await redis.expire("active_viewed_cameras", ttl_seconds)
                 await redis.zremrangebyscore("active_viewed_cameras_zset", "-inf", now_ts)
             return len(mapping)
         except Exception as exc:
@@ -122,6 +128,7 @@ class CameraScheduler:
             if mapping:
                 await redis.zadd("active_route_cameras_zset", mapping)
                 await redis.sadd("active_route_cameras", *mapping.keys())
+                await redis.expire("active_route_cameras", ttl_seconds)
                 await redis.zremrangebyscore("active_route_cameras_zset", "-inf", now_ts)
             return len(mapping)
         except Exception as exc:
